@@ -387,6 +387,7 @@ public:
   NamedDecl *getUnderlyingDecl() {
     // Fast-path the common case.
     if (this->getKind() != UsingShadow &&
+        this->getKind() != ConstructorUsingShadow &&
         this->getKind() != ObjCCompatibleAlias &&
         this->getKind() != NamespaceAlias)
       return this;
@@ -881,6 +882,12 @@ protected:
     /// variable;  see isARCPseudoStrong() for details.
     unsigned ARCPseudoStrong : 1;
 
+    /// \brief Whether this variable is (C++1z) inline.
+    unsigned IsInline : 1;
+
+    /// \brief Whether this variable has (C++1z) inline explicitly specified.
+    unsigned IsInlineSpecified : 1;
+
     /// \brief Whether this variable is (C++0x) constexpr.
     unsigned IsConstexpr : 1;
 
@@ -1102,9 +1109,6 @@ public:
   /// definition of a static data member.
   bool isOutOfLine() const override;
 
-  /// \brief If this is a static data member, find its out-of-line definition.
-  VarDecl *getOutOfLineDefinition();
-
   /// isFileVarDecl - Returns true for file scoped variable declaration.
   bool isFileVarDecl() const {
     Kind K = getKind();
@@ -1248,6 +1252,24 @@ public:
   void setARCPseudoStrong(bool ps) {
     assert(!isa<ParmVarDecl>(this));
     NonParmVarDeclBits.ARCPseudoStrong = ps;
+  }
+
+  /// Whether this variable is (C++1z) inline.
+  bool isInline() const {
+    return isa<ParmVarDecl>(this) ? false : NonParmVarDeclBits.IsInline;
+  }
+  bool isInlineSpecified() const {
+    return isa<ParmVarDecl>(this) ? false
+                                  : NonParmVarDeclBits.IsInlineSpecified;
+  }
+  void setInlineSpecified() {
+    assert(!isa<ParmVarDecl>(this));
+    NonParmVarDeclBits.IsInline = true;
+    NonParmVarDeclBits.IsInlineSpecified = true;
+  }
+  void setImplicitlyInline() {
+    assert(!isa<ParmVarDecl>(this));
+    NonParmVarDeclBits.IsInline = true;
   }
 
   /// Whether this variable is (C++11) constexpr.
@@ -3637,6 +3659,14 @@ public:
   void setParam(unsigned i, ImplicitParamDecl *P) {
     assert(i < NumParams);
     getParams()[i] = P;
+  }
+
+  // ArrayRef interface to parameters.
+  ArrayRef<ImplicitParamDecl *> parameters() const {
+    return {getParams(), getNumParams()};
+  }
+  MutableArrayRef<ImplicitParamDecl *> parameters() {
+    return {getParams(), getNumParams()};
   }
 
   /// \brief Retrieve the parameter containing captured variables.

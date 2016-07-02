@@ -372,6 +372,9 @@ TargetCodeGenInfo::getDependentLibraryOption(llvm::StringRef Lib,
   Opt += Lib;
 }
 
+unsigned TargetCodeGenInfo::getOpenCLKernelCallingConv() const {
+  return llvm::CallingConv::C;
+}
 static bool isEmptyRecord(ASTContext &Context, QualType T, bool AllowArrays);
 
 /// isEmptyField - Return true iff a the field is "empty", that is it
@@ -4963,6 +4966,8 @@ public:
     case llvm::Triple::EABIHF:
     case llvm::Triple::GNUEABI:
     case llvm::Triple::GNUEABIHF:
+    case llvm::Triple::MuslEABI:
+    case llvm::Triple::MuslEABIHF:
       return true;
     default:
       return false;
@@ -4973,6 +4978,7 @@ public:
     switch (getTarget().getTriple().getEnvironment()) {
     case llvm::Triple::EABIHF:
     case llvm::Triple::GNUEABIHF:
+    case llvm::Triple::MuslEABIHF:
       return true;
     default:
       return false;
@@ -6825,6 +6831,7 @@ public:
     : TargetCodeGenInfo(new DefaultABIInfo(CGT)) {}
   void setTargetAttributes(const Decl *D, llvm::GlobalValue *GV,
                            CodeGen::CodeGenModule &M) const override;
+  unsigned getOpenCLKernelCallingConv() const override;
 };
 
 }
@@ -6852,6 +6859,10 @@ void AMDGPUTargetCodeGenInfo::setTargetAttributes(
   }
 }
 
+
+unsigned AMDGPUTargetCodeGenInfo::getOpenCLKernelCallingConv() const {
+  return llvm::CallingConv::AMDGPU_KERNEL;
+}
 
 //===----------------------------------------------------------------------===//
 // SPARC v8 ABI Implementation.
@@ -7502,6 +7513,7 @@ public:
     : TargetCodeGenInfo(new DefaultABIInfo(CGT)) {}
   void emitTargetMD(const Decl *D, llvm::GlobalValue *GV,
                     CodeGen::CodeGenModule &M) const override;
+  unsigned getOpenCLKernelCallingConv() const override;
 };
 } // End anonymous namespace.
 
@@ -7529,6 +7541,10 @@ void SPIRTargetCodeGenInfo::emitTargetMD(const Decl *D, llvm::GlobalValue *GV,
   llvm::NamedMDNode *OCLVerMD =
       M.getOrInsertNamedMetadata("opencl.ocl.version");
   OCLVerMD->addOperand(llvm::MDNode::get(Ctx, OCLVerElts));
+}
+
+unsigned SPIRTargetCodeGenInfo::getOpenCLKernelCallingConv() const {
+  return llvm::CallingConv::SPIR_KERNEL;
 }
 
 static bool appendType(SmallStringEnc &Enc, QualType QType,
@@ -7933,6 +7949,7 @@ const TargetCodeGenInfo &CodeGenModule::getTargetCodeGenInfo() {
     else if (CodeGenOpts.FloatABI == "hard" ||
              (CodeGenOpts.FloatABI != "soft" &&
               (Triple.getEnvironment() == llvm::Triple::GNUEABIHF ||
+               Triple.getEnvironment() == llvm::Triple::MuslEABIHF ||
                Triple.getEnvironment() == llvm::Triple::EABIHF)))
       Kind = ARMABIInfo::AAPCS_VFP;
 

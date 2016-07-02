@@ -1222,7 +1222,14 @@ Sema::ActOnCXXTypeConstructExpr(ParsedType TypeRep,
   if (!TInfo)
     TInfo = Context.getTrivialTypeSourceInfo(Ty, SourceLocation());
 
-  return BuildCXXTypeConstructExpr(TInfo, LParenLoc, exprs, RParenLoc);
+  auto Result = BuildCXXTypeConstructExpr(TInfo, LParenLoc, exprs, RParenLoc);
+  // Avoid creating a non-type-dependent expression that contains typos.
+  // Non-type-dependent expressions are liable to be discarded without
+  // checking for embedded typos.
+  if (!Result.isInvalid() && Result.get()->isInstantiationDependent() &&
+      !Result.get()->isTypeDependent())
+    Result = CorrectDelayedTyposInExpr(Result.get());
+  return Result;
 }
 
 /// ActOnCXXTypeConstructExpr - Parse construction of a specified type.
@@ -3186,9 +3193,8 @@ static ExprResult BuildCXXCastArgument(Sema &S,
     if (S.CompleteConstructorCall(Constructor, From, CastLoc, ConstructorArgs))
       return ExprError();
 
-    S.CheckConstructorAccess(CastLoc, Constructor,
-                             InitializedEntity::InitializeTemporary(Ty),
-                             Constructor->getAccess());
+    S.CheckConstructorAccess(CastLoc, Constructor, FoundDecl,
+                             InitializedEntity::InitializeTemporary(Ty));
     if (S.DiagnoseUseOfDecl(Method, CastLoc))
       return ExprError();
 

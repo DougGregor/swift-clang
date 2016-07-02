@@ -158,13 +158,13 @@ namespace {
     /// True if the subobject was named in a manner not supported by C++11. Such
     /// lvalues can still be folded, but they are not core constant expressions
     /// and we cannot perform lvalue-to-rvalue conversions on them.
-    bool Invalid : 1;
+    unsigned Invalid : 1;
 
     /// Is this a pointer one past the end of an object?
-    bool IsOnePastTheEnd : 1;
+    unsigned IsOnePastTheEnd : 1;
 
     /// Indicator of whether the most-derived object is an array element.
-    bool MostDerivedIsArrayElement : 1;
+    unsigned MostDerivedIsArrayElement : 1;
 
     /// The length of the path to the most-derived object of which this is a
     /// subobject.
@@ -997,6 +997,16 @@ void EvalInfo::addCallStack(unsigned Limit) {
       continue;
     }
 
+    // Use a different note for an inheriting constructor, because from the
+    // user's perspective it's not really a function at all.
+    if (auto *CD = dyn_cast_or_null<CXXConstructorDecl>(Frame->Callee)) {
+      if (CD->isInheritingConstructor()) {
+        addDiag(Frame->CallLoc, diag::note_constexpr_inherited_ctor_call_here)
+          << CD->getParent();
+        continue;
+      }
+    }
+
     SmallVector<char, 128> Buffer;
     llvm::raw_svector_ostream Out(Buffer);
     describeCall(Frame, Out);
@@ -1048,7 +1058,7 @@ namespace {
   struct LValue {
     APValue::LValueBase Base;
     CharUnits Offset;
-    bool InvalidBase : 1;
+    unsigned InvalidBase : 1;
     unsigned CallIndex : 31;
     SubobjectDesignator Designator;
 
@@ -3845,11 +3855,25 @@ static bool CheckConstexprFunction(EvalInfo &Info, SourceLocation CallLoc,
 
   if (Info.getLangOpts().CPlusPlus11) {
     const FunctionDecl *DiagDecl = Definition ? Definition : Declaration;
-    // FIXME: If DiagDecl is an implicitly-declared special member function, we
-    // should be much more explicit about why it's not constexpr.
-    Info.Diag(CallLoc, diag::note_constexpr_invalid_function, 1)
-      << DiagDecl->isConstexpr() << isa<CXXConstructorDecl>(DiagDecl)
-      << DiagDecl;
+
+    // If this function is not constexpr because it is an inherited
+    // non-constexpr constructor, diagnose that directly.
+    auto *CD = dyn_cast<CXXConstructorDecl>(DiagDecl);
+    if (CD && CD->isInheritingConstructor()) {
+      auto *Inherited = CD->getInheritedConstructor().getConstructor();
+      if (!Inherited->isConstexpr()) 
+        DiagDecl = CD = Inherited;
+    }
+
+    // FIXME: If DiagDecl is an implicitly-declared special member function
+    // or an inheriting constructor, we should be much more explicit about why
+    // it's not constexpr.
+    if (CD && CD->isInheritingConstructor())
+      Info.Diag(CallLoc, diag::note_constexpr_invalid_inhctor, 1)
+        << CD->getInheritedConstructor().getConstructor()->getParent();
+    else
+      Info.Diag(CallLoc, diag::note_constexpr_invalid_function, 1)
+        << DiagDecl->isConstexpr() << (bool)CD << DiagDecl;
     Info.Note(DiagDecl->getLocation(), diag::note_declared_at);
   } else {
     Info.Diag(CallLoc, diag::note_invalid_subexpr_in_const_expr);
@@ -3945,14 +3969,11 @@ static bool HandleFunctionCall(SourceLocation CallLoc,
 }
 
 /// Evaluate a constructor call.
-static bool HandleConstructorCall(SourceLocation CallLoc, const LValue &This,
-                                  ArrayRef<const Expr*> Args,
+static bool HandleConstructorCall(const Expr *E, const LValue &This,
+                                  APValue *ArgValues,
                                   const CXXConstructorDecl *Definition,
                                   EvalInfo &Info, APValue &Result) {
-  ArgVector ArgValues(Args.size());
-  if (!EvaluateArgs(Args, ArgValues, Info))
-    return false;
-
+  SourceLocation CallLoc = E->getExprLoc();
   if (!Info.CheckCallLimit(CallLoc))
     return false;
 
@@ -3962,14 +3983,14 @@ static bool HandleConstructorCall(SourceLocation CallLoc, const LValue &This,
     return false;
   }
 
-  CallStackFrame Frame(Info, CallLoc, Definition, &This, ArgValues.data());
+  CallStackFrame Frame(Info, CallLoc, Definition, &This, ArgValues);
 
   // FIXME: Creating an APValue just to hold a nonexistent return value is
   // wasteful.
   APValue RetVal;
   StmtResult Ret = {RetVal, nullptr};
 
-  // If it's a delegating constructor, just delegate.
+  // If it's a delegating constructor, delegate.
   if (Definition->isDelegatingConstructor()) {
     CXXConstructorDecl::init_const_iterator I = Definition->init_begin();
     {
@@ -3993,8 +4014,9 @@ static bool HandleConstructorCall(SourceLocation CallLoc, const LValue &This,
        (Definition->isTrivial() && hasFields(Definition->getParent())))) {
     LValue RHS;
     RHS.setFrom(Info.Ctx, ArgValues[0]);
-    return handleLValueToRValueConversion(Info, Args[0], Args[0]->getType(),
-                                          RHS, Result);
+    return handleLValueToRValueConversion(
+        Info, E, Definition->getParamDecl(0)->getType().getNonReferenceType(),
+        RHS, Result);
   }
 
   // Reserve space for the struct members.
@@ -4086,6 +4108,18 @@ static bool HandleConstructorCall(SourceLocation CallLoc, const LValue &This,
 
   return Success &&
          EvaluateStmt(Ret, Info, Definition->getBody()) != ESR_Failed;
+}
+
+static bool HandleConstructorCall(const Expr *E, const LValue &This,
+                                  ArrayRef<const Expr*> Args,
+                                  const CXXConstructorDecl *Definition,
+                                  EvalInfo &Info, APValue &Result) {
+  ArgVector ArgValues(Args.size());
+  if (!EvaluateArgs(Args, ArgValues, Info))
+    return false;
+
+  return HandleConstructorCall(E, This, ArgValues.data(), Definition,
+                               Info, Result);
 }
 
 //===----------------------------------------------------------------------===//
@@ -5380,6 +5414,7 @@ namespace {
     bool VisitCXXConstructExpr(const CXXConstructExpr *E) {
       return VisitCXXConstructExpr(E, E->getType());
     }
+    bool VisitCXXInheritedCtorInitExpr(const CXXInheritedCtorInitExpr *E);
     bool VisitCXXConstructExpr(const CXXConstructExpr *E, QualType T);
     bool VisitCXXStdInitializerListExpr(const CXXStdInitializerListExpr *E);
   };
@@ -5631,7 +5666,29 @@ bool RecordExprEvaluator::VisitCXXConstructExpr(const CXXConstructExpr *E,
     return false;
 
   auto Args = llvm::makeArrayRef(E->getArgs(), E->getNumArgs());
-  return HandleConstructorCall(E->getExprLoc(), This, Args,
+  return HandleConstructorCall(E, This, Args,
+                               cast<CXXConstructorDecl>(Definition), Info,
+                               Result);
+}
+
+bool RecordExprEvaluator::VisitCXXInheritedCtorInitExpr(
+    const CXXInheritedCtorInitExpr *E) {
+  if (!Info.CurrentCall) {
+    assert(Info.checkingPotentialConstantExpression());
+    return false;
+  }
+
+  const CXXConstructorDecl *FD = E->getConstructor();
+  if (FD->isInvalidDecl() || FD->getParent()->isInvalidDecl())
+    return false;
+
+  const FunctionDecl *Definition = nullptr;
+  auto Body = FD->getBody(Definition);
+
+  if (!CheckConstexprFunction(Info, E->getExprLoc(), FD, Definition, Body))
+    return false;
+
+  return HandleConstructorCall(E, This, Info.CurrentCall->Arguments,
                                cast<CXXConstructorDecl>(Definition), Info,
                                Result);
 }
@@ -6540,25 +6597,32 @@ static const Expr *ignorePointerCastsAndParens(const Expr *E) {
 ///
 /// Please note: this function is specialized for how __builtin_object_size
 /// views "objects".
+///
+/// If this encounters an invalid RecordDecl, it will always return true.
 static bool isDesignatorAtObjectEnd(const ASTContext &Ctx, const LValue &LVal) {
   assert(!LVal.Designator.Invalid);
 
-  auto IsLastFieldDecl = [&Ctx](const FieldDecl *FD) {
-    if (FD->getParent()->isUnion())
+  auto IsLastOrInvalidFieldDecl = [&Ctx](const FieldDecl *FD, bool &Invalid) {
+    const RecordDecl *Parent = FD->getParent();
+    Invalid = Parent->isInvalidDecl();
+    if (Invalid || Parent->isUnion())
       return true;
-    const ASTRecordLayout &Layout = Ctx.getASTRecordLayout(FD->getParent());
+    const ASTRecordLayout &Layout = Ctx.getASTRecordLayout(Parent);
     return FD->getFieldIndex() + 1 == Layout.getFieldCount();
   };
 
   auto &Base = LVal.getLValueBase();
   if (auto *ME = dyn_cast_or_null<MemberExpr>(Base.dyn_cast<const Expr *>())) {
     if (auto *FD = dyn_cast<FieldDecl>(ME->getMemberDecl())) {
-      if (!IsLastFieldDecl(FD))
-        return false;
+      bool Invalid;
+      if (!IsLastOrInvalidFieldDecl(FD, Invalid))
+        return Invalid;
     } else if (auto *IFD = dyn_cast<IndirectFieldDecl>(ME->getMemberDecl())) {
-      for (auto *FD : IFD->chain())
-        if (!IsLastFieldDecl(cast<FieldDecl>(FD)))
-          return false;
+      for (auto *FD : IFD->chain()) {
+        bool Invalid;
+        if (!IsLastOrInvalidFieldDecl(cast<FieldDecl>(FD), Invalid))
+          return Invalid;
+      }
     }
   }
 
@@ -6581,8 +6645,9 @@ static bool isDesignatorAtObjectEnd(const ASTContext &Ctx, const LValue &LVal) {
         return false;
       BaseType = CT->getElementType();
     } else if (auto *FD = getAsField(LVal.Designator.Entries[I])) {
-      if (!IsLastFieldDecl(FD))
-        return false;
+      bool Invalid;
+      if (!IsLastOrInvalidFieldDecl(FD, Invalid))
+        return Invalid;
       BaseType = FD->getType();
     } else {
       assert(getAsBaseClass(LVal.Designator.Entries[I]) != nullptr &&
@@ -9297,6 +9362,7 @@ static ICEDiag CheckICE(const Expr* E, const ASTContext &Ctx) {
   case Expr::TypoExprClass:
   case Expr::DependentScopeDeclRefExprClass:
   case Expr::CXXConstructExprClass:
+  case Expr::CXXInheritedCtorInitExprClass:
   case Expr::CXXStdInitializerListExprClass:
   case Expr::CXXBindTemporaryExprClass:
   case Expr::ExprWithCleanupsClass:
@@ -9760,17 +9826,17 @@ bool Expr::isPotentialConstantExpr(const FunctionDecl *FD,
 
   ArrayRef<const Expr*> Args;
 
-  SourceLocation Loc = FD->getLocation();
-
   APValue Scratch;
   if (const CXXConstructorDecl *CD = dyn_cast<CXXConstructorDecl>(FD)) {
     // Evaluate the call as a constant initializer, to allow the construction
     // of objects of non-literal types.
     Info.setEvaluatingDecl(This.getLValueBase(), Scratch);
-    HandleConstructorCall(Loc, This, Args, CD, Info, Scratch);
-  } else
+    HandleConstructorCall(&VIE, This, Args, CD, Info, Scratch);
+  } else {
+    SourceLocation Loc = FD->getLocation();
     HandleFunctionCall(Loc, FD, (MD && MD->isInstance()) ? &This : nullptr,
                        Args, FD->getBody(), Info, Scratch, nullptr);
+  }
 
   return Diags.empty();
 }

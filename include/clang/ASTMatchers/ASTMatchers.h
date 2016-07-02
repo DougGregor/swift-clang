@@ -2197,6 +2197,19 @@ AST_MATCHER_P(CXXRecordDecl, hasMethod, internal::Matcher<CXXMethodDecl>,
                                     Node.method_end(), Finder, Builder);
 }
 
+/// \brief Matches the generated class of lambda expressions.
+///
+/// Given:
+/// \code
+///   auto x = []{};
+/// \endcode
+///
+/// \c cxxRecordDecl(isLambda()) matches the implicit class declaration of
+/// \c decltype(x)
+AST_MATCHER(CXXRecordDecl, isLambda) {
+  return Node.isLambda();
+}
+
 /// \brief Matches AST nodes that have child AST nodes that match the
 /// provided matcher.
 ///
@@ -4640,6 +4653,21 @@ AST_TYPELOC_TRAVERSE_MATCHER(pointee, getPointee,
 /// typedefType()
 ///   matches "typedef int X"
 AST_TYPE_MATCHER(TypedefType, typedefType);
+
+/// \brief Matches enum types.
+///
+/// Given
+/// \code
+///   enum C { Green };
+///   enum class S { Red };
+///
+///   C c;
+///   S s;
+/// \endcode
+//
+/// \c enumType() matches the type of the variable declarations of both \c c and
+/// \c s.
+AST_TYPE_MATCHER(EnumType, enumType);
 
 /// \brief Matches template specialization types.
 ///

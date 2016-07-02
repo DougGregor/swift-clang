@@ -699,6 +699,11 @@ void StmtProfiler::VisitOMPTargetUpdateDirective(
   VisitOMPExecutableDirective(S);
 }
 
+void StmtProfiler::VisitOMPDistributeParallelForDirective(
+    const OMPDistributeParallelForDirective *S) {
+  VisitOMPLoopDirective(S);
+}
+
 void StmtProfiler::VisitExpr(const Expr *S) {
   VisitStmt(S);
 }
@@ -1280,6 +1285,12 @@ void StmtProfiler::VisitCXXConstructExpr(const CXXConstructExpr *S) {
   VisitExpr(S);
   VisitDecl(S->getConstructor());
   ID.AddBoolean(S->isElidable());
+}
+
+void StmtProfiler::VisitCXXInheritedCtorInitExpr(
+    const CXXInheritedCtorInitExpr *S) {
+  VisitExpr(S);
+  VisitDecl(S->getConstructor());
 }
 
 void StmtProfiler::VisitCXXFunctionalCastExpr(const CXXFunctionalCastExpr *S) {

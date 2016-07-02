@@ -41,6 +41,7 @@
 #include "llvm/Support/Path.h"
 #include "llvm/Support/Process.h"
 #include "llvm/Target/TargetOptions.h"
+#include "llvm/Support/ScopedPrinter.h"
 #include <atomic>
 #include <memory>
 #include <sys/stat.h>
@@ -1463,10 +1464,10 @@ static void ParseAPINotesArgs(APINotesOptions &Opts, ArgList &Args) {
 }
 
 bool isOpenCL(LangStandard::Kind LangStd) {
-  return LangStd == LangStandard::lang_opencl
-    || LangStd == LangStandard::lang_opencl11
-    || LangStd == LangStandard::lang_opencl12
-    || LangStd == LangStandard::lang_opencl20;
+  return LangStd == LangStandard::lang_opencl ||
+         LangStd == LangStandard::lang_opencl11 ||
+         LangStd == LangStandard::lang_opencl12 ||
+         LangStd == LangStandard::lang_opencl20;
 }
 
 void CompilerInvocation::setLangDefaults(LangOptions &Opts, InputKind IK,
@@ -1677,6 +1678,18 @@ static void ParseLangArgs(LangOptions &Opts, ArgList &Args, InputKind IK,
     else
       LangStd = OpenCLLangStd;
   }
+
+  // -cl-strict-aliasing needs to emit diagnostic in the case where CL > 1.0.
+  // This option should be deprecated for CL > 1.0 because
+  // this option was added for compatibility with OpenCL 1.0.
+  if (const Arg *A = Args.getLastArg(OPT_cl_strict_aliasing))
+    if (Opts.OpenCLVersion > 100) {
+      std::string VerSpec = llvm::to_string(Opts.OpenCLVersion / 100) +
+                            std::string (".") +
+                            llvm::to_string((Opts.OpenCLVersion % 100) / 10);
+      Diags.Report(diag::warn_option_invalid_ocl_version)
+      << VerSpec << A->getAsString(Args);
+    }
 
   Opts.IncludeDefaultHeader = Args.hasArg(OPT_finclude_default_header);
 
@@ -2070,7 +2083,7 @@ static void ParseLangArgs(LangOptions &Opts, ArgList &Args, InputKind IK,
   }
 
   // Get the OpenMP target triples if any.
-  if (Arg *A = Args.getLastArg(options::OPT_fomptargets_EQ)) {
+  if (Arg *A = Args.getLastArg(options::OPT_fopenmp_targets_EQ)) {
 
     for (unsigned i = 0; i < A->getNumValues(); ++i) {
       llvm::Triple TT(A->getValue(i));
@@ -2084,7 +2097,7 @@ static void ParseLangArgs(LangOptions &Opts, ArgList &Args, InputKind IK,
 
   // Get OpenMP host file path if any and report if a non existent file is
   // found
-  if (Arg *A = Args.getLastArg(options::OPT_fomp_host_ir_file_path)) {
+  if (Arg *A = Args.getLastArg(options::OPT_fopenmp_host_ir_file_path)) {
     Opts.OMPHostIRFile = A->getValue();
     if (!llvm::sys::fs::exists(Opts.OMPHostIRFile))
       Diags.Report(clang::diag::err_drv_omp_host_ir_file_not_found)

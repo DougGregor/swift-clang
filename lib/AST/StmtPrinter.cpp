@@ -1153,6 +1153,12 @@ void StmtPrinter::VisitOMPTargetUpdateDirective(
   PrintOMPExecutableDirective(Node);
 }
 
+void StmtPrinter::VisitOMPDistributeParallelForDirective(
+    OMPDistributeParallelForDirective *Node) {
+  Indent() << "#pragma omp distribute parallel for ";
+  PrintOMPExecutableDirective(Node);
+}
+
 //===----------------------------------------------------------------------===//
 //  Expr printing methods.
 //===----------------------------------------------------------------------===//
@@ -2180,6 +2186,11 @@ void StmtPrinter::VisitCXXConstructExpr(CXXConstructExpr *E) {
 
   if (E->isListInitialization() && !E->isStdInitListInitialization())
     OS << "}";
+}
+
+void StmtPrinter::VisitCXXInheritedCtorInitExpr(CXXInheritedCtorInitExpr *E) {
+  // Parens are printed by the surrounding context.
+  OS << "<forwarded>";
 }
 
 void StmtPrinter::VisitCXXStdInitializerListExpr(CXXStdInitializerListExpr *E) {

@@ -765,6 +765,15 @@ CodeGenModule::getFunctionLinkage(GlobalDecl GD) {
                                    : llvm::GlobalValue::LinkOnceODRLinkage;
   }
 
+  if (isa<CXXConstructorDecl>(D) &&
+      cast<CXXConstructorDecl>(D)->isInheritingConstructor() &&
+      Context.getTargetInfo().getCXXABI().isMicrosoft()) {
+    // Our approach to inheriting constructors is fundamentally different from
+    // that used by the MS ABI, so keep our inheriting constructor thunks
+    // internal rather than trying to pick an unambiguous mangling for them.
+    return llvm::GlobalValue::InternalLinkage;
+  }
+
   return getLLVMLinkageForDeclarator(D, Linkage, /*isConstantVariable=*/false);
 }
 
@@ -787,8 +796,7 @@ void CodeGenModule::setFunctionDLLStorageClass(GlobalDecl GD, llvm::Function *F)
     F->setDLLStorageClass(llvm::GlobalVariable::DefaultStorageClass);
 }
 
-llvm::ConstantInt *
-CodeGenModule::CreateCfiIdForTypeMetadata(llvm::Metadata *MD) {
+llvm::ConstantInt *CodeGenModule::CreateCrossDsoCfiTypeId(llvm::Metadata *MD) {
   llvm::MDString *MDS = dyn_cast<llvm::MDString>(MD);
   if (!MDS) return nullptr;
 
@@ -989,8 +997,8 @@ static void setLinkageAndVisibilityForGV(llvm::GlobalValue *GV,
   }
 }
 
-void CodeGenModule::CreateFunctionBitSetEntry(const FunctionDecl *FD,
-                                              llvm::Function *F) {
+void CodeGenModule::CreateFunctionTypeMetadata(const FunctionDecl *FD,
+                                               llvm::Function *F) {
   // Only if we are checking indirect calls.
   if (!LangOpts.Sanitize.has(SanitizerKind::CFIICall))
     return;
@@ -1011,25 +1019,13 @@ void CodeGenModule::CreateFunctionBitSetEntry(const FunctionDecl *FD,
       return;
   }
 
-  llvm::NamedMDNode *BitsetsMD =
-      getModule().getOrInsertNamedMetadata("llvm.bitsets");
-
   llvm::Metadata *MD = CreateMetadataIdentifierForType(FD->getType());
-  llvm::Metadata *BitsetOps[] = {
-      MD, llvm::ConstantAsMetadata::get(F),
-      llvm::ConstantAsMetadata::get(llvm::ConstantInt::get(Int64Ty, 0))};
-  BitsetsMD->addOperand(llvm::MDTuple::get(getLLVMContext(), BitsetOps));
+  F->addTypeMetadata(0, MD);
 
   // Emit a hash-based bit set entry for cross-DSO calls.
-  if (CodeGenOpts.SanitizeCfiCrossDso) {
-    if (auto TypeId = CreateCfiIdForTypeMetadata(MD)) {
-      llvm::Metadata *BitsetOps2[] = {
-          llvm::ConstantAsMetadata::get(TypeId),
-          llvm::ConstantAsMetadata::get(F),
-          llvm::ConstantAsMetadata::get(llvm::ConstantInt::get(Int64Ty, 0))};
-      BitsetsMD->addOperand(llvm::MDTuple::get(getLLVMContext(), BitsetOps2));
-    }
-  }
+  if (CodeGenOpts.SanitizeCfiCrossDso)
+    if (auto CrossDsoTypeId = CreateCrossDsoCfiTypeId(MD))
+      F->addTypeMetadata(0, llvm::ConstantAsMetadata::get(CrossDsoTypeId));
 }
 
 void CodeGenModule::SetFunctionAttributes(GlobalDecl GD, llvm::Function *F,
@@ -1090,7 +1086,7 @@ void CodeGenModule::SetFunctionAttributes(GlobalDecl GD, llvm::Function *F,
     if (MD->isVirtual())
       F->setUnnamedAddr(llvm::GlobalValue::UnnamedAddr::Global);
 
-  CreateFunctionBitSetEntry(FD, F);
+  CreateFunctionTypeMetadata(FD, F);
 }
 
 void CodeGenModule::addUsedGlobal(llvm::GlobalValue *GV) {
@@ -2614,7 +2610,7 @@ static bool isVarDeclStrongDefinition(const ASTContext &Context,
   if (shouldBeInCOMDAT(CGM, *D))
     return true;
 
-  // Declarations with a required alignment do not have common linakge in MSVC
+  // Declarations with a required alignment do not have common linkage in MSVC
   // mode.
   if (Context.getTargetInfo().getCXXABI().isMicrosoft()) {
     if (D->hasAttr<AlignedAttr>())
@@ -2675,9 +2671,18 @@ llvm::GlobalValue::LinkageTypes CodeGenModule::getLLVMLinkageForDeclarator(
   // explicit instantiations can occur in multiple translation units
   // and must all be equivalent. However, we are not allowed to
   // throw away these explicit instantiations.
-  if (Linkage == GVA_StrongODR)
-    return !Context.getLangOpts().AppleKext ? llvm::Function::WeakODRLinkage
-                                            : llvm::Function::ExternalLinkage;
+  //
+  // We don't currently support CUDA device code spread out across multiple TUs,
+  // so say that CUDA templates are either external (for kernels) or internal.
+  // This lets llvm perform aggressive inter-procedural optimizations.
+  if (Linkage == GVA_StrongODR) {
+    if (Context.getLangOpts().AppleKext)
+      return llvm::Function::ExternalLinkage;
+    if (Context.getLangOpts().CUDA && Context.getLangOpts().CUDAIsDevice)
+      return D->hasAttr<CUDAGlobalAttr>() ? llvm::Function::ExternalLinkage
+                                          : llvm::Function::InternalLinkage;
+    return llvm::Function::WeakODRLinkage;
+  }
 
   // C++ doesn't have tentative definitions and thus cannot have common
   // linkage.
@@ -3761,6 +3766,12 @@ void CodeGenModule::EmitTopLevelDecl(Decl *D) {
   case Decl::Namespace:
     EmitNamespace(cast<NamespaceDecl>(D));
     break;
+  case Decl::CXXRecord:
+    // Emit any static data members, they may be definitions.
+    for (auto *I : cast<CXXRecordDecl>(D)->decls())
+      if (isa<VarDecl>(I) || isa<CXXRecordDecl>(I))
+        EmitTopLevelDecl(I);
+    break;
     // No code generation needed.
   case Decl::UsingShadow:
   case Decl::ClassTemplate:
@@ -4221,8 +4232,8 @@ llvm::Metadata *CodeGenModule::CreateMetadataIdentifierForType(QualType T) {
   return InternalId;
 }
 
-/// Returns whether this module needs the "all-vtables" bitset.
-bool CodeGenModule::NeedAllVtablesBitSet() const {
+/// Returns whether this module needs the "all-vtables" type identifier.
+bool CodeGenModule::NeedAllVtablesTypeId() const {
   // Returns true if at least one of vtable-based CFI checkers is enabled and
   // is not in the trapping mode.
   return ((LangOpts.Sanitize.has(SanitizerKind::CFIVCall) &&
@@ -4235,38 +4246,21 @@ bool CodeGenModule::NeedAllVtablesBitSet() const {
            !CodeGenOpts.SanitizeTrap.has(SanitizerKind::CFIUnrelatedCast)));
 }
 
-void CodeGenModule::CreateVTableBitSetEntry(llvm::NamedMDNode *BitsetsMD,
-                                            llvm::GlobalVariable *VTable,
-                                            CharUnits Offset,
-                                            const CXXRecordDecl *RD) {
+void CodeGenModule::AddVTableTypeMetadata(llvm::GlobalVariable *VTable,
+                                          CharUnits Offset,
+                                          const CXXRecordDecl *RD) {
   llvm::Metadata *MD =
       CreateMetadataIdentifierForType(QualType(RD->getTypeForDecl(), 0));
-  llvm::Metadata *BitsetOps[] = {
-      MD, llvm::ConstantAsMetadata::get(VTable),
-      llvm::ConstantAsMetadata::get(
-          llvm::ConstantInt::get(Int64Ty, Offset.getQuantity()))};
-  BitsetsMD->addOperand(llvm::MDTuple::get(getLLVMContext(), BitsetOps));
+  VTable->addTypeMetadata(Offset.getQuantity(), MD);
 
-  if (CodeGenOpts.SanitizeCfiCrossDso) {
-    if (auto TypeId = CreateCfiIdForTypeMetadata(MD)) {
-      llvm::Metadata *BitsetOps2[] = {
-          llvm::ConstantAsMetadata::get(TypeId),
-          llvm::ConstantAsMetadata::get(VTable),
-          llvm::ConstantAsMetadata::get(
-              llvm::ConstantInt::get(Int64Ty, Offset.getQuantity()))};
-      BitsetsMD->addOperand(llvm::MDTuple::get(getLLVMContext(), BitsetOps2));
-    }
-  }
+  if (CodeGenOpts.SanitizeCfiCrossDso)
+    if (auto CrossDsoTypeId = CreateCrossDsoCfiTypeId(MD))
+      VTable->addTypeMetadata(Offset.getQuantity(),
+                              llvm::ConstantAsMetadata::get(CrossDsoTypeId));
 
-  if (NeedAllVtablesBitSet()) {
+  if (NeedAllVtablesTypeId()) {
     llvm::Metadata *MD = llvm::MDString::get(getLLVMContext(), "all-vtables");
-    llvm::Metadata *BitsetOps[] = {
-        MD, llvm::ConstantAsMetadata::get(VTable),
-        llvm::ConstantAsMetadata::get(
-            llvm::ConstantInt::get(Int64Ty, Offset.getQuantity()))};
-    // Avoid adding a node to BitsetsMD twice.
-    if (!llvm::MDTuple::getIfExists(getLLVMContext(), BitsetOps))
-      BitsetsMD->addOperand(llvm::MDTuple::get(getLLVMContext(), BitsetOps));
+    VTable->addTypeMetadata(Offset.getQuantity(), MD);
   }
 }
 

@@ -171,6 +171,7 @@ RegistryMaps::RegistryMaps() {
   REGISTER_MATCHER(elaboratedType);
   REGISTER_MATCHER(enumConstantDecl);
   REGISTER_MATCHER(enumDecl);
+  REGISTER_MATCHER(enumType);
   REGISTER_MATCHER(equalsBoundNode);
   REGISTER_MATCHER(equalsIntegralValue);
   REGISTER_MATCHER(explicitCastExpr);
@@ -307,6 +308,7 @@ RegistryMaps::RegistryMaps() {
   REGISTER_MATCHER(isInteger);
   REGISTER_MATCHER(isIntegral);
   REGISTER_MATCHER(isInTemplateInstantiation);
+  REGISTER_MATCHER(isLambda);
   REGISTER_MATCHER(isListInitialization);
   REGISTER_MATCHER(isMemberInitializer);
   REGISTER_MATCHER(isMoveAssignmentOperator);

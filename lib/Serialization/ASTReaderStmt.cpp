@@ -1250,6 +1250,14 @@ void ASTStmtReader::VisitCXXConstructExpr(CXXConstructExpr *E) {
   E->ParenOrBraceRange = ReadSourceRange(Record, Idx);
 }
 
+void ASTStmtReader::VisitCXXInheritedCtorInitExpr(CXXInheritedCtorInitExpr *E) {
+  VisitExpr(E);
+  E->Constructor = ReadDeclAs<CXXConstructorDecl>(Record, Idx);
+  E->Loc = ReadSourceLocation(Record, Idx);
+  E->ConstructsVirtualBase = Record[Idx++];
+  E->InheritedFromVirtualBase = Record[Idx++];
+}
+
 void ASTStmtReader::VisitCXXTemporaryObjectExpr(CXXTemporaryObjectExpr *E) {
   VisitCXXConstructExpr(E);
   E->Type = GetTypeSourceInfo(Record, Idx);
@@ -2471,6 +2479,10 @@ void ASTStmtReader::VisitOMPLoopDirective(OMPLoopDirective *D) {
     D->setNextUpperBound(Reader.ReadSubExpr());
     D->setNumIterations(Reader.ReadSubExpr());
   }
+  if (isOpenMPLoopBoundSharingDirective(D->getDirectiveKind())) {
+    D->setPrevLowerBoundVariable(Reader.ReadSubExpr());
+    D->setPrevUpperBoundVariable(Reader.ReadSubExpr());
+  }
   SmallVector<Expr *, 4> Sub;
   unsigned CollapsedNum = D->getCollapsedNumber();
   Sub.reserve(CollapsedNum);
@@ -2702,6 +2714,10 @@ void ASTStmtReader::VisitOMPTargetUpdateDirective(OMPTargetUpdateDirective *D) {
   VisitStmt(D);
   ++Idx;
   VisitOMPExecutableDirective(D);
+}
+void ASTStmtReader::VisitOMPDistributeParallelForDirective(
+    OMPDistributeParallelForDirective *D) {
+  VisitOMPLoopDirective(D);
 }
 
 //===----------------------------------------------------------------------===//
@@ -3379,6 +3395,14 @@ Stmt *ASTReader::ReadStmtFromStream(ModuleFile &F) {
       break;
     }
 
+    case STMT_OMP_DISTRIBUTE_PARALLEL_FOR_DIRECTIVE: {
+      unsigned NumClauses = Record[ASTStmtReader::NumStmtFields];
+      unsigned CollapsedNum = Record[ASTStmtReader::NumStmtFields + 1];
+      S = OMPDistributeParallelForDirective::CreateEmpty(Context, NumClauses,
+                                                         CollapsedNum, Empty);
+      break;
+    }
+
     case EXPR_CXX_OPERATOR_CALL:
       S = new (Context) CXXOperatorCallExpr(Context, Empty);
       break;
@@ -3389,6 +3413,10 @@ Stmt *ASTReader::ReadStmtFromStream(ModuleFile &F) {
 
     case EXPR_CXX_CONSTRUCT:
       S = new (Context) CXXConstructExpr(Empty);
+      break;
+
+    case EXPR_CXX_INHERITED_CTOR_INIT:
+      S = new (Context) CXXInheritedCtorInitExpr(Empty);
       break;
 
     case EXPR_CXX_TEMPORARY_OBJECT:

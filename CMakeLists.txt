@@ -214,19 +214,6 @@ if(CLANG_REPOSITORY_STRING)
   add_definitions(-DCLANG_REPOSITORY_STRING="${CLANG_REPOSITORY_STRING}")
 endif()
 
-option(CLANG_APPEND_VC_REV
-  "Append the version control system revision id to clang version spew" OFF)
-if(CLANG_APPEND_VC_REV)
-  if(NOT SVN_REVISION)
-    # This macro will set SVN_REVISION in the parent scope
-    add_version_info_from_vcs(VERSION_VAR)
-  endif()
-
-  if(SVN_REVISION)
-    add_definitions(-DSVN_REVISION="${SVN_REVISION}")
-  endif()
-endif()
-
 set(CLANG_VENDOR_UTI "org.llvm.clang" CACHE STRING
   "Vendor-specific uti.")
 
@@ -609,28 +596,7 @@ if(APPLE)
   endif()
 endif()
 
-# Generate a list of CMake library targets so that other CMake projects can
-# link against them. LLVM calls its version of this file LLVMExports.cmake, but
-# the usual CMake convention seems to be ${Project}Targets.cmake.
-set(CLANG_INSTALL_PACKAGE_DIR lib${LLVM_LIBDIR_SUFFIX}/cmake/clang)
-set(clang_cmake_builddir "${CMAKE_BINARY_DIR}/${CLANG_INSTALL_PACKAGE_DIR}")
-get_property(CLANG_EXPORTS GLOBAL PROPERTY CLANG_EXPORTS)
-export(TARGETS ${CLANG_EXPORTS} FILE ${clang_cmake_builddir}/ClangTargets.cmake)
-
-# Install a <prefix>/lib/cmake/clang/ClangConfig.cmake file so that
-# find_package(Clang) works. Install the target list with it.
-install(EXPORT ClangTargets DESTINATION ${CLANG_INSTALL_PACKAGE_DIR})
-
-install(FILES
-  ${CMAKE_CURRENT_SOURCE_DIR}/cmake/modules/ClangConfig.cmake
-  DESTINATION lib${LLVM_LIBDIR_SUFFIX}/cmake/clang)
-
-# Also copy ClangConfig.cmake to the build directory so that dependent projects
-# can build against a build directory of Clang more easily.
-configure_file(
-  ${CMAKE_CURRENT_SOURCE_DIR}/cmake/modules/ClangConfig.cmake
-  ${CLANG_BINARY_DIR}/lib${LLVM_LIBDIR_SUFFIX}/cmake/clang/ClangConfig.cmake
-  COPYONLY)
+add_subdirectory(cmake/modules)
 
 if (CLANG_ENABLE_BOOTSTRAP)
   include(ExternalProject)

@@ -1959,6 +1959,8 @@ public:
   void VisitOMPTaskLoopDirective(const OMPTaskLoopDirective *D);
   void VisitOMPTaskLoopSimdDirective(const OMPTaskLoopSimdDirective *D);
   void VisitOMPDistributeDirective(const OMPDistributeDirective *D);
+  void VisitOMPDistributeParallelForDirective(
+      const OMPDistributeParallelForDirective *D);
 
 private:
   void AddDeclarationNameInfo(const Stmt *S);
@@ -2709,6 +2711,11 @@ void EnqueueVisitor::VisitOMPTaskLoopSimdDirective(
 
 void EnqueueVisitor::VisitOMPDistributeDirective(
     const OMPDistributeDirective *D) {
+  VisitOMPLoopDirective(D);
+}
+
+void EnqueueVisitor::VisitOMPDistributeParallelForDirective(
+    const OMPDistributeParallelForDirective *D) {
   VisitOMPLoopDirective(D);
 }
 
@@ -3948,6 +3955,9 @@ static const Decl *getDeclFromExpr(const Stmt *E) {
   if (const CXXConstructExpr *CE = dyn_cast<CXXConstructExpr>(E))
     if (!CE->isElidable())
     return CE->getConstructor();
+  if (const CXXInheritedCtorInitExpr *CE =
+          dyn_cast<CXXInheritedCtorInitExpr>(E))
+    return CE->getConstructor();
   if (const ObjCMessageExpr *OME = dyn_cast<ObjCMessageExpr>(E))
     return OME->getMethodDecl();
 
@@ -4825,6 +4835,8 @@ CXString clang_getCursorKindSpelling(enum CXCursorKind Kind) {
     return cxstring::createRef("OMPTaskLoopSimdDirective");
   case CXCursor_OMPDistributeDirective:
     return cxstring::createRef("OMPDistributeDirective");
+  case CXCursor_OMPDistributeParallelForDirective:
+    return cxstring::createRef("OMPDistributeParallelForDirective");
   case CXCursor_OverloadCandidate:
       return cxstring::createRef("OverloadCandidate");
   case CXCursor_TypeAliasTemplateDecl:
@@ -5656,6 +5668,7 @@ CXCursor clang_getCursorDefinition(CXCursor C) {
                                        D->getLocation(), TU);
 
   case Decl::UsingShadow:
+  case Decl::ConstructorUsingShadow:
     return clang_getCursorDefinition(
                        MakeCXCursor(cast<UsingShadowDecl>(D)->getTargetDecl(),
                                     TU));

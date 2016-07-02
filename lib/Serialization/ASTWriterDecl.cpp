@@ -107,6 +107,7 @@ namespace clang {
     void VisitTypeAliasTemplateDecl(TypeAliasTemplateDecl *D);
     void VisitUsingDecl(UsingDecl *D);
     void VisitUsingShadowDecl(UsingShadowDecl *D);
+    void VisitConstructorUsingShadowDecl(ConstructorUsingShadowDecl *D);
     void VisitLinkageSpecDecl(LinkageSpecDecl *D);
     void VisitFileScopeAsmDecl(FileScopeAsmDecl *D);
     void VisitImportDecl(ImportDecl *D);
@@ -895,6 +896,8 @@ void ASTDeclWriter::VisitVarDecl(VarDecl *D) {
     Record.push_back(D->isNRVOVariable());
     Record.push_back(D->isCXXForRangeDecl());
     Record.push_back(D->isARCPseudoStrong());
+    Record.push_back(D->isInline());
+    Record.push_back(D->isInlineSpecified());
     Record.push_back(D->isConstexpr());
     Record.push_back(D->isInitCapture());
     Record.push_back(D->isPreviousDeclInSameBlockScope());
@@ -941,6 +944,7 @@ void ASTDeclWriter::VisitVarDecl(VarDecl *D) {
       D->getInit() == nullptr &&
       !isa<ParmVarDecl>(D) &&
       !isa<VarTemplateSpecializationDecl>(D) &&
+      !D->isInline() &&
       !D->isConstexpr() &&
       !D->isInitCapture() &&
       !D->isPreviousDeclInSameBlockScope() &&
@@ -1123,6 +1127,15 @@ void ASTDeclWriter::VisitUsingShadowDecl(UsingShadowDecl *D) {
   Code = serialization::DECL_USING_SHADOW;
 }
 
+void ASTDeclWriter::VisitConstructorUsingShadowDecl(
+    ConstructorUsingShadowDecl *D) {
+  VisitUsingShadowDecl(D);
+  Record.AddDeclRef(D->NominatedBaseClassShadowDecl);
+  Record.AddDeclRef(D->ConstructedBaseClassShadowDecl);
+  Record.push_back(D->IsVirtual);
+  Code = serialization::DECL_CONSTRUCTOR_USING_SHADOW;
+}
+
 void ASTDeclWriter::VisitUsingDirectiveDecl(UsingDirectiveDecl *D) {
   VisitNamedDecl(D);
   Record.AddSourceLocation(D->getUsingLoc());
@@ -1208,12 +1221,21 @@ void ASTDeclWriter::VisitCXXMethodDecl(CXXMethodDecl *D) {
 }
 
 void ASTDeclWriter::VisitCXXConstructorDecl(CXXConstructorDecl *D) {
+  if (auto Inherited = D->getInheritedConstructor()) {
+    Record.AddDeclRef(Inherited.getShadowDecl());
+    Record.AddDeclRef(Inherited.getConstructor());
+    Code = serialization::DECL_CXX_INHERITED_CONSTRUCTOR;
+  } else {
+    Code = serialization::DECL_CXX_CONSTRUCTOR;
+  }
+
   VisitCXXMethodDecl(D);
 
-  Record.AddDeclRef(D->getInheritedConstructor());
   Record.push_back(D->IsExplicitSpecified);
 
-  Code = serialization::DECL_CXX_CONSTRUCTOR;
+  Code = D->isInheritingConstructor()
+             ? serialization::DECL_CXX_INHERITED_CONSTRUCTOR
+             : serialization::DECL_CXX_CONSTRUCTOR;
 }
 
 void ASTDeclWriter::VisitCXXDestructorDecl(CXXDestructorDecl *D) {
@@ -1916,6 +1938,8 @@ void ASTWriter::WriteDeclAbbrevs() {
   Abv->Add(BitCodeAbbrevOp(BitCodeAbbrevOp::Fixed, 1)); // isNRVOVariable
   Abv->Add(BitCodeAbbrevOp(BitCodeAbbrevOp::Fixed, 1)); // isCXXForRangeDecl
   Abv->Add(BitCodeAbbrevOp(BitCodeAbbrevOp::Fixed, 1)); // isARCPseudoStrong
+  Abv->Add(BitCodeAbbrevOp(0));                         // isInline
+  Abv->Add(BitCodeAbbrevOp(0));                         // isInlineSpecified
   Abv->Add(BitCodeAbbrevOp(0));                         // isConstexpr
   Abv->Add(BitCodeAbbrevOp(0));                         // isInitCapture
   Abv->Add(BitCodeAbbrevOp(0));                         // isPrevDeclInSameScope
