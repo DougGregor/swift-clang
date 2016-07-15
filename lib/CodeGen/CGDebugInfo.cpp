@@ -209,9 +209,7 @@ StringRef CGDebugInfo::getFunctionName(const FunctionDecl *FD) {
   // Add any template specialization args.
   if (Info) {
     const TemplateArgumentList *TArgs = Info->TemplateArguments;
-    const TemplateArgument *Args = TArgs->data();
-    unsigned NumArgs = TArgs->size();
-    TemplateSpecializationType::PrintTemplateArgumentList(OS, Args, NumArgs,
+    TemplateSpecializationType::PrintTemplateArgumentList(OS, TArgs->asArray(),
                                                           Policy);
   }
 
@@ -259,20 +257,56 @@ StringRef CGDebugInfo::getSelectorName(Selector S) {
 }
 
 StringRef CGDebugInfo::getClassName(const RecordDecl *RD) {
-  // quick optimization to avoid having to intern strings that are already
-  // stored reliably elsewhere
-  if (!isa<ClassTemplateSpecializationDecl>(RD))
-    return RD->getName();
-
-  SmallString<128> Name;
-  {
+  if (isa<ClassTemplateSpecializationDecl>(RD)) {
+    SmallString<128> Name;
     llvm::raw_svector_ostream OS(Name);
     RD->getNameForDiagnostic(OS, CGM.getContext().getPrintingPolicy(),
                              /*Qualified*/ false);
+
+    // Copy this name on the side and use its reference.
+    return internString(Name);
   }
 
-  // Copy this name on the side and use its reference.
-  return internString(Name);
+  // quick optimization to avoid having to intern strings that are already
+  // stored reliably elsewhere
+  if (const IdentifierInfo *II = RD->getIdentifier())
+    return II->getName();
+
+  // The CodeView printer in LLVM wants to see the names of unnamed types: it is
+  // used to reconstruct the fully qualified type names.
+  if (CGM.getCodeGenOpts().EmitCodeView) {
+    if (const TypedefNameDecl *D = RD->getTypedefNameForAnonDecl()) {
+      assert(RD->getDeclContext() == D->getDeclContext() &&
+             "Typedef should not be in another decl context!");
+      assert(D->getDeclName().getAsIdentifierInfo() &&
+             "Typedef was not named!");
+      return D->getDeclName().getAsIdentifierInfo()->getName();
+    }
+
+    if (CGM.getLangOpts().CPlusPlus) {
+      StringRef Name;
+
+      ASTContext &Context = CGM.getContext();
+      if (const DeclaratorDecl *DD = Context.getDeclaratorForUnnamedTagDecl(RD))
+        // Anonymous types without a name for linkage purposes have their
+        // declarator mangled in if they have one.
+        Name = DD->getName();
+      else if (const TypedefNameDecl *TND =
+                   Context.getTypedefNameForUnnamedTagDecl(RD))
+        // Anonymous types without a name for linkage purposes have their
+        // associate typedef mangled in if they have one.
+        Name = TND->getName();
+
+      if (!Name.empty()) {
+        SmallString<256> UnnamedType("<unnamed-type-");
+        UnnamedType += Name;
+        UnnamedType += '>';
+        return internString(UnnamedType);
+      }
+    }
+  }
+
+  return StringRef();
 }
 
 llvm::DIFile *CGDebugInfo::getOrCreateFile(SourceLocation Loc) {
@@ -809,7 +843,7 @@ llvm::DIType *CGDebugInfo::CreateType(const TemplateSpecializationType *Ty,
                               /*qualified*/ false);
 
   TemplateSpecializationType::PrintTemplateArgumentList(
-      OS, Ty->getArgs(), Ty->getNumArgs(),
+      OS, Ty->template_arguments(),
       CGM.getContext().getPrintingPolicy());
 
   TypeAliasDecl *AliasDecl = cast<TypeAliasTemplateDecl>(
@@ -2887,7 +2921,7 @@ void CGDebugInfo::EmitFunctionStart(GlobalDecl GD, SourceLocation Loc,
   // are emitted as CU level entities by the backend.
   llvm::DISubprogram *SP = DBuilder.createFunction(
       FDContext, Name, LinkageName, Unit, LineNo,
-      getOrCreateFunctionType(D, FnType, Unit), Fn->hasInternalLinkage(),
+      getOrCreateFunctionType(D, FnType, Unit), Fn->hasLocalLinkage(),
       true /*definition*/, ScopeLine, Flags, CGM.getLangOpts().Optimize,
       TParamsArray.get(), getFunctionDeclaration(D));
   Fn->setSubprogram(SP);
@@ -3501,7 +3535,7 @@ llvm::DIGlobalVariable *CGDebugInfo::CollectAnonRecordDecls(
     // Use VarDecl's Tag, Scope and Line number.
     GV = DBuilder.createGlobalVariable(DContext, FieldName, LinkageName, Unit,
                                        LineNo, FieldTy,
-                                       Var->hasInternalLinkage(), Var, nullptr);
+                                       Var->hasLocalLinkage(), Var, nullptr);
   }
   return GV;
 }
@@ -3534,7 +3568,7 @@ void CGDebugInfo::EmitGlobalVariable(llvm::GlobalVariable *Var,
   } else {
     GV = DBuilder.createGlobalVariable(
         DContext, DeclName, LinkageName, Unit, LineNo, getOrCreateType(T, Unit),
-        Var->hasInternalLinkage(), Var,
+        Var->hasLocalLinkage(), Var,
         getOrCreateStaticDataMemberDeclarationOrNull(D));
   }
   DeclCache[D->getCanonicalDecl()].reset(static_cast<llvm::Metadata *>(GV));

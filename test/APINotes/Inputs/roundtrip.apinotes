@@ -10,6 +10,7 @@ Classes:
     SwiftPrivate:    false
     SwiftName:       ''
     SwiftBridge:     ''
+    NSErrorDomain:   ''
     Methods:         
       - Selector:        init
         MethodKind:      Instance
@@ -54,6 +55,7 @@ Classes:
     SwiftPrivate:    false
     SwiftName:       ''
     SwiftBridge:     View
+    NSErrorDomain:   ''
     Methods:         
       - Selector:        'addSubview:'
         MethodKind:      Instance
@@ -65,6 +67,13 @@ Classes:
         SwiftName:       ''
       - Selector:        'addSubview:positioned:relativeTo:'
         MethodKind:      Instance
+        Parameters:      
+          - Position:        0
+            NoEscape:        false
+          - Position:        1
+            NoEscape:        false
+          - Position:        2
+            NoEscape:        true
         Nullability:     [ N, N, O ]
         NullabilityOfRet: N
         Availability:    available
@@ -113,12 +122,20 @@ Enumerators:
     SwiftPrivate:    false
     SwiftName:       Red
 Tags:            
+  - Name:            NSSomeEnum
+    Availability:    available
+    AvailabilityMsg: ''
+    SwiftPrivate:    false
+    SwiftName:       SomeEnum
+    SwiftBridge:     ''
+    NSErrorDomain:   some_error_domain
   - Name:            NSSomeStruct
     Availability:    available
     AvailabilityMsg: ''
     SwiftPrivate:    false
     SwiftName:       SomeStruct
     SwiftBridge:     ''
+    NSErrorDomain:   ''
 Typedefs:        
   - Name:            NSTypedef
     Availability:    available
@@ -126,3 +143,4 @@ Typedefs:
     SwiftPrivate:    false
     SwiftName:       Typedef
     SwiftBridge:     ''
+    NSErrorDomain:   ''

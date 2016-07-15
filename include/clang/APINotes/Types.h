@@ -129,24 +129,33 @@ class CommonTypeInfo : public CommonEntityInfo {
   /// Reflects the swift_bridge attribute.
   std::string SwiftBridge;
 
+  /// The NS error domain for this type.
+  std::string NSErrorDomain;
+
 public:
   CommonTypeInfo() : CommonEntityInfo() { }
 
   const std::string &getSwiftBridge() const { return SwiftBridge; }
   void setSwiftBridge(const std::string &swiftType) { SwiftBridge = swiftType; }
 
+  const std::string &getNSErrorDomain() const { return NSErrorDomain; }
+  void setNSErrorDomain(const std::string &domain) { NSErrorDomain = domain; }
+
   friend CommonTypeInfo &operator|=(CommonTypeInfo &lhs,
                                     const CommonTypeInfo &rhs) {
     static_cast<CommonEntityInfo &>(lhs) |= rhs;
     if (lhs.SwiftBridge.empty() && !rhs.SwiftBridge.empty())
       lhs.SwiftBridge = rhs.SwiftBridge;
+    if (lhs.NSErrorDomain.empty() && !rhs.NSErrorDomain.empty())
+      lhs.NSErrorDomain = rhs.NSErrorDomain;
     return lhs;
   }
 
   friend bool operator==(const CommonTypeInfo &lhs,
                          const CommonTypeInfo &rhs) {
     return static_cast<const CommonEntityInfo &>(lhs) == rhs &&
-      lhs.SwiftBridge == rhs.SwiftBridge;
+      lhs.SwiftBridge == rhs.SwiftBridge &&
+      lhs.NSErrorDomain == rhs.NSErrorDomain;
   }
 
   friend bool operator!=(const CommonTypeInfo &lhs,
@@ -259,7 +268,6 @@ public:
     Nullable = static_cast<unsigned>(kind);
   }
 
-
   friend bool operator==(const VariableInfo &lhs, const VariableInfo &rhs) {
     return static_cast<const CommonEntityInfo &>(lhs) == rhs &&
            lhs.NullabilityAudited == rhs.NullabilityAudited &&
@@ -270,6 +278,13 @@ public:
     return !(lhs == rhs);
   }
 
+  friend VariableInfo &operator|=(VariableInfo &lhs,
+                                  const VariableInfo &rhs) {
+    static_cast<CommonEntityInfo &>(lhs) |= rhs;
+    if (!lhs.NullabilityAudited && rhs.NullabilityAudited)
+      lhs.setNullabilityAudited(*rhs.getNullability());
+    return lhs;
+  }
 };
 
 /// Describes API notes data for an Objective-C property.
@@ -288,6 +303,34 @@ public:
     }
 
     return lhs;
+  }
+};
+
+/// Describes a function or method parameter.
+class ParamInfo : public VariableInfo {
+  /// Whether the this parameter has the 'noescape' attribute.
+  unsigned NoEscape : 1;
+
+public:
+  ParamInfo() : VariableInfo(), NoEscape(false) { }
+
+  bool isNoEscape() const { return NoEscape; }
+  void setNoEscape(bool noescape) { NoEscape = noescape; }
+
+  friend ParamInfo &operator|=(ParamInfo &lhs, const ParamInfo &rhs) {
+    static_cast<VariableInfo &>(lhs) |= rhs;
+    if (!lhs.NoEscape && rhs.NoEscape)
+      lhs.NoEscape = true;
+    return lhs;
+  }
+
+  friend bool operator==(const ParamInfo &lhs, const ParamInfo &rhs) {
+    return static_cast<const VariableInfo &>(lhs) == rhs &&
+           lhs.NoEscape == rhs.NoEscape;
+  }
+
+  friend bool operator!=(const ParamInfo &lhs, const ParamInfo &rhs) {
+    return !(lhs == rhs);
   }
 };
 
@@ -323,6 +366,9 @@ public:
   //  about the return type is stored at position 0, followed by the nullability
   //  of the parameters.
   uint64_t NullabilityPayload = 0;
+
+  /// The function parameters.
+  std::vector<ParamInfo> Params;
 
   FunctionInfo()
     : CommonEntityInfo(),

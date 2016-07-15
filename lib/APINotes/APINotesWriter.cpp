@@ -308,7 +308,9 @@ namespace {
   // Retrieve the serialized size of the given CommonTypeInfo, for use
   // in on-disk hash tables.
   static unsigned getCommonTypeInfoSize(const CommonTypeInfo &info) {
-    return 2 + info.getSwiftBridge().size() + getCommonEntityInfoSize(info);
+    return 2 + info.getSwiftBridge().size() +
+           2 + info.getNSErrorDomain().size() +
+           getCommonEntityInfoSize(info);
   }
 
   /// Emit a serialized representation of the common type information.
@@ -317,6 +319,8 @@ namespace {
     endian::Writer<little> writer(out);
     writer.write<uint16_t>(info.getSwiftBridge().size());
     out.write(info.getSwiftBridge().c_str(), info.getSwiftBridge().size());
+    writer.write<uint16_t>(info.getNSErrorDomain().size());
+    out.write(info.getNSErrorDomain().c_str(), info.getNSErrorDomain().size());
   }
 
   /// Used to serialize the on-disk Objective-C context table.
@@ -489,7 +493,8 @@ namespace {
   /// Retrieve the serialized size of the given FunctionInfo, for use in
   /// on-disk hash tables.
   static unsigned getFunctionInfoSize(const FunctionInfo &info) {
-    return 2 + sizeof(uint64_t) + getCommonEntityInfoSize(info);
+    return 2 + sizeof(uint64_t) + getCommonEntityInfoSize(info) + 
+           2 + info.Params.size() * 1;
   }
 
   /// Emit a serialized representation of the function information.
@@ -500,6 +505,20 @@ namespace {
     writer.write<uint8_t>(info.NullabilityAudited);
     writer.write<uint8_t>(info.NumAdjustedNullable);
     writer.write<uint64_t>(info.NullabilityPayload);
+
+    // Parameters.
+    writer.write<uint16_t>(info.Params.size());
+    for (const auto &pi : info.Params) {
+      uint8_t payload = pi.isNoEscape();
+
+      auto nullability = pi.getNullability();
+      payload = (payload << 1) | nullability.hasValue();
+
+      payload = payload << 2;
+      if (nullability)
+        payload |= static_cast<uint8_t>(*nullability);
+      writer.write<uint8_t>(payload);
+    }
   }
 
   /// Used to serialize the on-disk Objective-C method table.
