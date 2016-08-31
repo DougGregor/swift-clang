@@ -428,6 +428,8 @@ namespace  {
     void VisitFunctionDecl(const FunctionDecl *D);
     void VisitFieldDecl(const FieldDecl *D);
     void VisitVarDecl(const VarDecl *D);
+    void VisitDecompositionDecl(const DecompositionDecl *D);
+    void VisitBindingDecl(const BindingDecl *D);
     void VisitFileScopeAsmDecl(const FileScopeAsmDecl *D);
     void VisitImportDecl(const ImportDecl *D);
     void VisitPragmaCommentDecl(const PragmaCommentDecl *D);
@@ -1215,6 +1217,19 @@ void ASTDumper::VisitVarDecl(const VarDecl *D) {
     }
     dumpStmt(D->getInit());
   }
+}
+
+void ASTDumper::VisitDecompositionDecl(const DecompositionDecl *D) {
+  VisitVarDecl(D);
+  for (auto *B : D->bindings())
+    dumpDecl(B);
+}
+
+void ASTDumper::VisitBindingDecl(const BindingDecl *D) {
+  dumpName(D);
+  dumpType(D->getType());
+  if (auto *E = D->getBinding())
+    dumpStmt(E);
 }
 
 void ASTDumper::VisitFileScopeAsmDecl(const FileScopeAsmDecl *D) {

@@ -593,7 +593,7 @@ bool ItaniumMangleContextImpl::shouldMangleCXXName(const NamedDecl *D) {
     return false;
 
   const VarDecl *VD = dyn_cast<VarDecl>(D);
-  if (VD) {
+  if (VD && !isa<DecompositionDecl>(D)) {
     // C variables are not mangled.
     if (VD->isExternC())
       return false;
@@ -1193,7 +1193,26 @@ void CXXNameMangler::mangleUnqualifiedName(const NamedDecl *ND,
   //                     ::= <source-name>
   switch (Name.getNameKind()) {
   case DeclarationName::Identifier: {
-    if (const IdentifierInfo *II = Name.getAsIdentifierInfo()) {
+    const IdentifierInfo *II = Name.getAsIdentifierInfo();
+
+    // We mangle decomposition declarations as the names of their bindings.
+    if (auto *DD = dyn_cast<DecompositionDecl>(ND)) {
+      // FIXME: Non-standard mangling for decomposition declarations:
+      //
+      //  <unqualified-name> ::= DC <source-name>* E
+      //
+      // These can never be referenced across translation units, so we do
+      // not need a cross-vendor mangling for anything other than demanglers.
+      // Proposed on cxx-abi-dev on 2016-08-12
+      Out << "DC";
+      for (auto *BD : DD->bindings())
+        mangleSourceName(BD->getDeclName().getAsIdentifierInfo());
+      Out << 'E';
+      writeAbiTags(ND, AdditionalAbiTags);
+      break;
+    }
+
+    if (II) {
       // We must avoid conflicts between internally- and externally-
       // linked variable and function declaration names in the same TU:
       //   void test() { extern void foo(); }
@@ -1471,7 +1490,7 @@ void CXXNameMangler::mangleLocalName(const Decl *D,
     // numbering will be local to the particular argument in which it appears
     // -- other default arguments do not affect its encoding.
     const CXXRecordDecl *CXXRD = dyn_cast<CXXRecordDecl>(RD);
-    if (CXXRD->isLambda()) {
+    if (CXXRD && CXXRD->isLambda()) {
       if (const ParmVarDecl *Parm
               = dyn_cast_or_null<ParmVarDecl>(CXXRD->getLambdaContextDecl())) {
         if (const FunctionDecl *Func
@@ -3239,6 +3258,7 @@ recurse:
   case Expr::ObjCDictionaryLiteralClass:
   case Expr::ObjCSubscriptRefExprClass:
   case Expr::ObjCIndirectCopyRestoreExprClass:
+  case Expr::ObjCAvailabilityCheckExprClass:
   case Expr::OffsetOfExprClass:
   case Expr::PredefinedExprClass:
   case Expr::ShuffleVectorExprClass:

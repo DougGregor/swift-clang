@@ -11,7 +11,6 @@
 //
 //===----------------------------------------------------------------------===//
 
-#include "clang/AST/APValue.h"
 #include "clang/AST/ASTContext.h"
 #include "clang/AST/Attr.h"
 #include "clang/AST/DeclCXX.h"
@@ -1570,6 +1569,7 @@ bool CastExpr::CastConsistency() const {
   case CK_ARCReclaimReturnedObject:
   case CK_ARCExtendBlockObject:
   case CK_ZeroToOCLEvent:
+  case CK_IntToOCLSampler:
     assert(!getType()->isBooleanType() && "unheralded conversion to bool");
     goto CheckNoBasePath;
 
@@ -2748,7 +2748,8 @@ bool Expr::isConstantInitializer(ASTContext &Ctx, bool IsForRef,
         CE->getCastKind() == CK_ToUnion ||
         CE->getCastKind() == CK_ConstructorConversion ||
         CE->getCastKind() == CK_NonAtomicToAtomic ||
-        CE->getCastKind() == CK_AtomicToNonAtomic)
+        CE->getCastKind() == CK_AtomicToNonAtomic ||
+        CE->getCastKind() == CK_IntToOCLSampler)
       return CE->getSubExpr()->isConstantInitializer(Ctx, false, Culprit);
 
     break;
@@ -2856,6 +2857,7 @@ bool Expr::HasSideEffects(const ASTContext &Ctx,
   case ObjCStringLiteralClass:
   case ObjCEncodeExprClass:
   case ObjCBoolLiteralExprClass:
+  case ObjCAvailabilityCheckExprClass:
   case CXXUuidofExprClass:
   case OpaqueValueExprClass:
     // These never have a side-effect.
@@ -3306,10 +3308,15 @@ FieldDecl *Expr::getSourceBitField() {
       if (Ivar->isBitField())
         return Ivar;
 
-  if (DeclRefExpr *DeclRef = dyn_cast<DeclRefExpr>(E))
+  if (DeclRefExpr *DeclRef = dyn_cast<DeclRefExpr>(E)) {
     if (FieldDecl *Field = dyn_cast<FieldDecl>(DeclRef->getDecl()))
       if (Field->isBitField())
         return Field;
+
+    if (BindingDecl *BD = dyn_cast<BindingDecl>(DeclRef->getDecl()))
+      if (Expr *E = BD->getBinding())
+        return E->getSourceBitField();
+  }
 
   if (BinaryOperator *BinOp = dyn_cast<BinaryOperator>(E)) {
     if (BinOp->isAssignmentOp() && BinOp->getLHS())
@@ -3327,6 +3334,7 @@ FieldDecl *Expr::getSourceBitField() {
 }
 
 bool Expr::refersToVectorElement() const {
+  // FIXME: Why do we not just look at the ObjectKind here?
   const Expr *E = this->IgnoreParens();
   
   while (const ImplicitCastExpr *ICE = dyn_cast<ImplicitCastExpr>(E)) {
@@ -3342,6 +3350,11 @@ bool Expr::refersToVectorElement() const {
 
   if (isa<ExtVectorElementExpr>(E))
     return true;
+
+  if (auto *DRE = dyn_cast<DeclRefExpr>(E))
+    if (auto *BD = dyn_cast<BindingDecl>(DRE->getDecl()))
+      if (auto *E = BD->getBinding())
+        return E->refersToVectorElement();
 
   return false;
 }
@@ -3395,8 +3408,11 @@ bool ExtVectorElementExpr::containsDuplicateElements() const {
 void ExtVectorElementExpr::getEncodedElementAccess(
     SmallVectorImpl<uint32_t> &Elts) const {
   StringRef Comp = Accessor->getName();
-  if (Comp[0] == 's' || Comp[0] == 'S')
+  bool isNumericAccessor = false;
+  if (Comp[0] == 's' || Comp[0] == 'S') {
     Comp = Comp.substr(1);
+    isNumericAccessor = true;
+  }
 
   bool isHi =   Comp == "hi";
   bool isLo =   Comp == "lo";
@@ -3415,7 +3431,7 @@ void ExtVectorElementExpr::getEncodedElementAccess(
     else if (isOdd)
       Index = 2 * i + 1;
     else
-      Index = ExtVectorType::getAccessorIdx(Comp[i]);
+      Index = ExtVectorType::getAccessorIdx(Comp[i], isNumericAccessor);
 
     Elts.push_back(Index);
   }

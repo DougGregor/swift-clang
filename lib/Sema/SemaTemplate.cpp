@@ -832,11 +832,10 @@ Sema::ActOnTemplateParameterList(unsigned Depth,
   if (ExportLoc.isValid())
     Diag(ExportLoc, diag::warn_template_export_unsupported);
 
-  // FIXME: store RequiresClause
   return TemplateParameterList::Create(
       Context, TemplateLoc, LAngleLoc,
       llvm::makeArrayRef((NamedDecl *const *)Params.data(), Params.size()),
-      RAngleLoc);
+      RAngleLoc, RequiresClause);
 }
 
 static void SetNestedNameSpecifier(TagDecl *T, const CXXScopeSpec &SS) {
@@ -1957,7 +1956,7 @@ TemplateParameterList *Sema::MatchTemplateParametersToScopeSpecifier(
       // Fabricate an empty template parameter list for the invented header.
       return TemplateParameterList::Create(Context, SourceLocation(),
                                            SourceLocation(), None,
-                                           SourceLocation());
+                                           SourceLocation(), nullptr);
     }
 
     return nullptr;
@@ -2075,11 +2074,8 @@ checkBuiltinTemplateIdType(Sema &SemaRef, BuiltinTemplateDecl *BTD,
     for (llvm::APSInt I(NumArgs.getBitWidth(), NumArgs.isUnsigned());
          I < NumArgs; ++I) {
       TemplateArgument TA(Context, I, ArgTy);
-      Expr *E = SemaRef.BuildExpressionFromIntegralTemplateArgument(
-                           TA, TemplateArgs[2].getLocation())
-                    .getAs<Expr>();
-      SyntheticTemplateArgs.addArgument(
-          TemplateArgumentLoc(TemplateArgument(E), E));
+      SyntheticTemplateArgs.addArgument(SemaRef.getTrivialTemplateArgumentLoc(
+          TA, ArgTy, TemplateArgs[2].getLocation()));
     }
     // The first template argument will be reused as the template decl that
     // our synthetic template arguments will be applied to.
@@ -7511,7 +7507,7 @@ Sema::ActOnExplicitInstantiation(Scope *S,
   // Set source locations for keywords.
   Specialization->setExternLoc(ExternLoc);
   Specialization->setTemplateKeywordLoc(TemplateLoc);
-  Specialization->setRBraceLoc(SourceLocation());
+  Specialization->setBraceRange(SourceRange());
 
   if (Attr)
     ProcessDeclAttributeList(S, Specialization, Attr);
@@ -8613,6 +8609,7 @@ bool Sema::IsInsideALocalClassWithinATemplateFunction() {
   return false;
 }
 
+namespace {
 /// \brief Walk the path from which a declaration was instantiated, and check
 /// that every explicit specialization along that path is visible. This enforces
 /// C++ [temp.expl.spec]/6:
@@ -8740,6 +8737,7 @@ private:
     }
   }
 };
+} // end anonymous namespace
 
 void Sema::checkSpecializationVisibility(SourceLocation Loc, NamedDecl *Spec) {
   if (!getLangOpts().Modules)

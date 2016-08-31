@@ -20,7 +20,6 @@
 #include "clang/AST/ExprCXX.h"
 #include "clang/AST/TemplateBase.h"
 #include "clang/AST/Type.h"
-#include "llvm/ADT/SmallString.h"
 #include "llvm/Support/raw_ostream.h"
 
 using namespace clang;
@@ -917,6 +916,8 @@ class TemplateDiff {
       /// template argument.
       InternalIterator(const TemplateSpecializationType *TST)
           : TST(TST), Index(0), CurrentTA(nullptr), EndTA(nullptr) {
+        if (!TST) return;
+
         if (isEnd()) return;
 
         // Set to first template argument.  If not a parameter pack, done.
@@ -937,11 +938,13 @@ class TemplateDiff {
 
       /// isEnd - Returns true if the iterator is one past the end.
       bool isEnd() const {
+        assert(TST && "InternalIterator is invalid with a null TST.");
         return Index >= TST->getNumArgs();
       }
 
       /// &operator++ - Increment the iterator to the next template argument.
       InternalIterator &operator++() {
+        assert(TST && "InternalIterator is invalid with a null TST.");
         if (isEnd()) {
           return *this;
         }
@@ -977,6 +980,7 @@ class TemplateDiff {
 
       /// operator* - Returns the appropriate TemplateArgument.
       reference operator*() const {
+        assert(TST && "InternalIterator is invalid with a null TST.");
         assert(!isEnd() && "Index exceeds number of arguments.");
         if (CurrentTA == EndTA)
           return TST->getArg(Index);
@@ -986,6 +990,7 @@ class TemplateDiff {
 
       /// operator-> - Allow access to the underlying TemplateArgument.
       pointer operator->() const {
+        assert(TST && "InternalIterator is invalid with a null TST.");
         return &operator*();
       }
     };

@@ -12,10 +12,8 @@
 //
 //===----------------------------------------------------------------------===//
 
-#include "clang/Serialization/ASTReader.h"
 #include "ASTCommon.h"
 #include "ASTReaderInternals.h"
-#include "clang/AST/ASTConsumer.h"
 #include "clang/AST/ASTContext.h"
 #include "clang/AST/DeclCXX.h"
 #include "clang/AST/DeclGroup.h"
@@ -24,6 +22,7 @@
 #include "clang/AST/Expr.h"
 #include "clang/Sema/IdentifierResolver.h"
 #include "clang/Sema/SemaDiagnostic.h"
+#include "clang/Serialization/ASTReader.h"
 #include "llvm/Support/SaveAndRestore.h"
 
 using namespace clang;
@@ -171,12 +170,12 @@ namespace clang {
       ASTReader &Reader;
       NamedDecl *New;
       NamedDecl *Existing;
-      mutable bool AddResult;
+      bool AddResult;
 
       unsigned AnonymousDeclNumber;
       IdentifierInfo *TypedefNameForLinkage;
 
-      void operator=(FindExistingResult&) = delete;
+      void operator=(FindExistingResult &&) = delete;
 
     public:
       FindExistingResult(ASTReader &Reader)
@@ -190,7 +189,7 @@ namespace clang {
             AnonymousDeclNumber(AnonymousDeclNumber),
             TypedefNameForLinkage(TypedefNameForLinkage) {}
 
-      FindExistingResult(const FindExistingResult &Other)
+      FindExistingResult(FindExistingResult &&Other)
           : Reader(Other.Reader), New(Other.New), Existing(Other.Existing),
             AddResult(Other.AddResult),
             AnonymousDeclNumber(Other.AnonymousDeclNumber),
@@ -313,6 +312,8 @@ namespace clang {
     void VisitVarDecl(VarDecl *VD) { VisitVarDeclImpl(VD); }
     void VisitImplicitParamDecl(ImplicitParamDecl *PD);
     void VisitParmVarDecl(ParmVarDecl *PD);
+    void VisitDecompositionDecl(DecompositionDecl *DD);
+    void VisitBindingDecl(BindingDecl *BD);
     void VisitNonTypeTemplateParmDecl(NonTypeTemplateParmDecl *D);
     DeclID VisitTemplateDecl(TemplateDecl *D);
     RedeclarableResult VisitRedeclarableTemplateDecl(RedeclarableTemplateDecl *D);
@@ -437,8 +438,9 @@ public:
 };
 } // end anonymous namespace
 
-template<typename DeclT>
-llvm::iterator_range<MergedRedeclIterator<DeclT>> merged_redecls(DeclT *D) {
+template <typename DeclT>
+static llvm::iterator_range<MergedRedeclIterator<DeclT>>
+merged_redecls(DeclT *D) {
   return llvm::make_range(MergedRedeclIterator<DeclT>(D),
                           MergedRedeclIterator<DeclT>());
 }
@@ -647,7 +649,7 @@ ASTDeclReader::RedeclarableResult ASTDeclReader::VisitTagDecl(TagDecl *TD) {
   TD->setEmbeddedInDeclarator(Record[Idx++]);
   TD->setFreeStanding(Record[Idx++]);
   TD->setCompleteDefinitionRequired(Record[Idx++]);
-  TD->setRBraceLoc(ReadSourceLocation(Record, Idx));
+  TD->setBraceRange(ReadSourceRange(Record, Idx));
   
   switch (Record[Idx++]) {
   case 0:
@@ -1293,6 +1295,18 @@ void ASTDeclReader::VisitParmVarDecl(ParmVarDecl *PD) {
 
   // FIXME: If this is a redeclaration of a function from another module, handle
   // inheritance of default arguments.
+}
+
+void ASTDeclReader::VisitDecompositionDecl(DecompositionDecl *DD) {
+  VisitVarDecl(DD);
+  BindingDecl **BDs = DD->getTrailingObjects<BindingDecl*>();
+  for (unsigned I = 0; I != DD->NumBindings; ++I)
+    BDs[I] = ReadDeclAs<BindingDecl>(Record, Idx);
+}
+
+void ASTDeclReader::VisitBindingDecl(BindingDecl *BD) {
+  VisitValueDecl(BD);
+  BD->Binding = Reader.ReadExpr(F);
 }
 
 void ASTDeclReader::VisitFileScopeAsmDecl(FileScopeAsmDecl *AD) {
@@ -2494,9 +2508,15 @@ inline void ASTReader::LoadedDecl(unsigned Index, Decl *D) {
 /// This routine should return true for anything that might affect
 /// code generation, e.g., inline function definitions, Objective-C
 /// declarations with metadata, etc.
-static bool isConsumerInterestedIn(Decl *D, bool HasBody) {
+static bool isConsumerInterestedIn(ASTContext &Ctx, Decl *D, bool HasBody) {
   // An ObjCMethodDecl is never considered as "interesting" because its
   // implementation container always is.
+
+  // An ImportDecl or VarDecl imported from a module will get emitted when
+  // we import the relevant module.
+  if ((isa<ImportDecl>(D) || isa<VarDecl>(D)) && Ctx.DeclMustBeEmitted(D) &&
+      D->getImportedOwningModule())
+    return false;
 
   if (isa<FileScopeAsmDecl>(D) || 
       isa<ObjCProtocolDecl>(D) || 
@@ -3394,6 +3414,12 @@ Decl *ASTReader::ReadDeclRecord(DeclID ID) {
   case DECL_PARM_VAR:
     D = ParmVarDecl::CreateDeserialized(Context, ID);
     break;
+  case DECL_DECOMPOSITION:
+    D = DecompositionDecl::CreateDeserialized(Context, ID, Record[Idx++]);
+    break;
+  case DECL_BINDING:
+    D = BindingDecl::CreateDeserialized(Context, ID);
+    break;
   case DECL_FILE_SCOPE_ASM:
     D = FileScopeAsmDecl::CreateDeserialized(Context, ID);
     break;
@@ -3462,13 +3488,6 @@ Decl *ASTReader::ReadDeclRecord(DeclID ID) {
   }
   assert(Idx == Record.size());
 
-  // If we have deserialized a declaration that has a definition the
-  // AST consumer might need to know about, queue it.
-  // We don't pass it to the consumer immediately because we may be in recursive
-  // loading, and some declarations may still be initializing.
-  if (isConsumerInterestedIn(D, Reader.hasPendingBody()))
-    addInterestingDecl(D);
-
   // Load any relevant update records.
   PendingUpdateRecords.push_back(std::make_pair(ID, D));
 
@@ -3477,6 +3496,13 @@ Decl *ASTReader::ReadDeclRecord(DeclID ID) {
     if (Class->isThisDeclarationADefinition())
       loadObjCCategories(ID, Class);
   
+  // If we have deserialized a declaration that has a definition the
+  // AST consumer might need to know about, queue it.
+  // We don't pass it to the consumer immediately because we may be in recursive
+  // loading, and some declarations may still be initializing.
+  if (isConsumerInterestedIn(Context, D, Reader.hasPendingBody()))
+    InterestingDecls.push_back(D);
+
   return D;
 }
 
@@ -3484,12 +3510,13 @@ void ASTReader::loadDeclUpdateRecords(serialization::DeclID ID, Decl *D) {
   // The declaration may have been modified by files later in the chain.
   // If this is the case, read the record containing the updates from each file
   // and pass it to ASTDeclReader to make the modifications.
+  ProcessingUpdatesRAIIObj ProcessingUpdates(*this);
   DeclUpdateOffsetsMap::iterator UpdI = DeclUpdateOffsets.find(ID);
   if (UpdI != DeclUpdateOffsets.end()) {
     auto UpdateOffsets = std::move(UpdI->second);
     DeclUpdateOffsets.erase(UpdI);
 
-    bool WasInteresting = isConsumerInterestedIn(D, false);
+    bool WasInteresting = isConsumerInterestedIn(Context, D, false);
     for (auto &FileAndOffset : UpdateOffsets) {
       ModuleFile *F = FileAndOffset.first;
       uint64_t Offset = FileAndOffset.second;
@@ -3510,8 +3537,8 @@ void ASTReader::loadDeclUpdateRecords(serialization::DeclID ID, Decl *D) {
       // We might have made this declaration interesting. If so, remember that
       // we need to hand it off to the consumer.
       if (!WasInteresting &&
-          isConsumerInterestedIn(D, Reader.hasPendingBody())) {
-        addInterestingDecl(D);
+          isConsumerInterestedIn(Context, D, Reader.hasPendingBody())) {
+        InterestingDecls.push_back(D);
         WasInteresting = true;
       }
     }
@@ -3846,7 +3873,7 @@ void ASTDeclReader::UpdateDecl(Decl *D, ModuleFile &ModuleFile,
       RD->setTagKind((TagTypeKind)Record[Idx++]);
       RD->setLocation(Reader.ReadSourceLocation(ModuleFile, Record, Idx));
       RD->setLocStart(Reader.ReadSourceLocation(ModuleFile, Record, Idx));
-      RD->setRBraceLoc(Reader.ReadSourceLocation(ModuleFile, Record, Idx));
+      RD->setBraceRange(Reader.ReadSourceRange(ModuleFile, Record, Idx));
 
       if (Record[Idx++]) {
         AttrVec Attrs;
@@ -3902,11 +3929,8 @@ void ASTDeclReader::UpdateDecl(Decl *D, ModuleFile &ModuleFile,
     }
 
     case UPD_DECL_MARKED_USED: {
-      // FIXME: This doesn't send the right notifications if there are
-      // ASTMutationListeners other than an ASTWriter.
-
       // Maintain AST consistency: any later redeclarations are used too.
-      D->setIsUsed();
+      D->markUsed(Reader.Context);
       break;
     }
 
@@ -3930,11 +3954,8 @@ void ASTDeclReader::UpdateDecl(Decl *D, ModuleFile &ModuleFile,
         Exported = TD->getDefinition();
       Module *Owner = SubmoduleID ? Reader.getSubmodule(SubmoduleID) : nullptr;
       if (Reader.getContext().getLangOpts().ModulesLocalVisibility) {
-        // FIXME: This doesn't send the right notifications if there are
-        // ASTMutationListeners other than an ASTWriter.
-        Reader.getContext().mergeDefinitionIntoModule(
-            cast<NamedDecl>(Exported), Owner,
-            /*NotifyListeners*/ false);
+        Reader.getContext().mergeDefinitionIntoModule(cast<NamedDecl>(Exported),
+                                                      Owner);
         Reader.PendingMergedDefinitionsToDeduplicate.insert(
             cast<NamedDecl>(Exported));
       } else if (Owner && Owner->NameVisibility != Module::AllVisible) {
@@ -3945,7 +3966,6 @@ void ASTDeclReader::UpdateDecl(Decl *D, ModuleFile &ModuleFile,
         // The declaration is now visible.
         Exported->Hidden = false;
       }
-      Reader.addInterestingDecl(Exported, Owner);
       break;
     }
 

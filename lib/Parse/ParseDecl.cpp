@@ -756,7 +756,7 @@ static bool VersionNumberSeparator(const char Separator) {
 ///   simple-integer ',' simple-integer
 ///   simple-integer ',' simple-integer ',' simple-integer
 VersionTuple Parser::ParseVersionTuple(SourceRange &Range) {
-  Range = Tok.getLocation();
+  Range = SourceRange(Tok.getLocation(), Tok.getEndLoc());
 
   if (!Tok.is(tok::numeric_constant)) {
     Diag(Tok, diag::err_expected_version);
@@ -884,7 +884,7 @@ VersionTuple Parser::ParseVersionTuple(SourceRange &Range) {
 ///
 /// version-arg:
 ///   'introduced' '=' version
-///   'deprecated' '=' version
+///   'deprecated' ['=' version]
 ///   'obsoleted' = version
 ///   'unavailable'
 /// opt-replacement:
@@ -969,6 +969,21 @@ void Parser::ParseAvailabilityAttribute(IdentifierInfo &Availability,
           << Keyword << SourceRange(UnavailableLoc);
       }
       UnavailableLoc = KeywordLoc;
+      continue;
+    }
+
+    if (Keyword == Ident_deprecated && Platform->Ident &&
+        Platform->Ident->getName() == "swift") {
+      // For swift, we deprecate for all versions.
+      if (!Changes[Deprecated].KeywordLoc.isInvalid()) {
+        Diag(KeywordLoc, diag::err_availability_redundant)
+          << Keyword
+          << SourceRange(Changes[Deprecated].KeywordLoc);
+      }
+
+      Changes[Deprecated].KeywordLoc = KeywordLoc;
+      // Use a fake version here.
+      Changes[Deprecated].Version = VersionTuple(1);
       continue;
     }
 
@@ -3809,8 +3824,7 @@ void Parser::ParseStructUnionBody(SourceLocation RecordLoc,
                       T.getOpenLocation(), T.getCloseLocation(),
                       attrs.getList());
   StructScope.Exit();
-  Actions.ActOnTagFinishDefinition(getCurScope(), TagDecl,
-                                   T.getCloseLocation());
+  Actions.ActOnTagFinishDefinition(getCurScope(), TagDecl, T.getRange());
 }
 
 /// ParseEnumSpecifier
@@ -4261,7 +4275,7 @@ void Parser::ParseEnumBody(SourceLocation StartLoc, Decl *EnumDecl) {
 
     if (Tok.is(tok::identifier)) {
       // We're missing a comma between enumerators.
-      SourceLocation Loc = PP.getLocForEndOfToken(PrevTokLocation);
+      SourceLocation Loc = getEndOfPreviousToken();
       Diag(Loc, diag::err_enumerator_list_missing_comma)
         << FixItHint::CreateInsertion(Loc, ", ");
       continue;
@@ -4305,7 +4319,7 @@ void Parser::ParseEnumBody(SourceLocation StartLoc, Decl *EnumDecl) {
   ParsedAttributes attrs(AttrFactory);
   MaybeParseGNUAttributes(attrs);
 
-  Actions.ActOnEnumBody(StartLoc, T.getOpenLocation(), T.getCloseLocation(),
+  Actions.ActOnEnumBody(StartLoc, T.getRange(),
                         EnumDecl, EnumConstantDecls,
                         getCurScope(),
                         attrs.getList());
@@ -4319,8 +4333,7 @@ void Parser::ParseEnumBody(SourceLocation StartLoc, Decl *EnumDecl) {
   }
 
   EnumScope.Exit();
-  Actions.ActOnTagFinishDefinition(getCurScope(), EnumDecl,
-                                   T.getCloseLocation());
+  Actions.ActOnTagFinishDefinition(getCurScope(), EnumDecl, T.getRange());
 
   // The next token must be valid after an enum definition. If not, a ';'
   // was probably forgotten.
@@ -5238,12 +5251,22 @@ static SourceLocation getMissingDeclaratorIdLoc(Declarator &D,
 ///          '~' class-name
 ///         template-id
 ///
+/// C++17 adds the following, which we also handle here:
+///
+///       simple-declaration:
+///         <decl-spec> '[' identifier-list ']' brace-or-equal-initializer ';'
+///
 /// Note, any additional constructs added here may need corresponding changes
 /// in isConstructorDeclarator.
 void Parser::ParseDirectDeclarator(Declarator &D) {
   DeclaratorScopeObj DeclScopeObj(*this, D.getCXXScopeSpec());
 
   if (getLangOpts().CPlusPlus && D.mayHaveIdentifier()) {
+    // This might be a C++17 structured binding.
+    if (Tok.is(tok::l_square) && !D.mayOmitIdentifier() &&
+        D.getCXXScopeSpec().isEmpty())
+      return ParseDecompositionDeclarator(D);
+
     // Don't parse FOO:BAR as if it were a typo for FOO::BAR inside a class, in
     // this context it is a bitfield. Also in range-based for statement colon
     // may delimit for-range-declaration.
@@ -5471,6 +5494,70 @@ void Parser::ParseDirectDeclarator(Declarator &D) {
       break;
     }
   }
+}
+
+void Parser::ParseDecompositionDeclarator(Declarator &D) {
+  assert(Tok.is(tok::l_square));
+
+  // If this doesn't look like a structured binding, maybe it's a misplaced
+  // array declarator.
+  // FIXME: Consume the l_square first so we don't need extra lookahead for
+  // this.
+  if (!(NextToken().is(tok::identifier) &&
+        GetLookAheadToken(2).isOneOf(tok::comma, tok::r_square)) &&
+      !(NextToken().is(tok::r_square) &&
+        GetLookAheadToken(2).isOneOf(tok::equal, tok::l_brace)))
+    return ParseMisplacedBracketDeclarator(D);
+
+  BalancedDelimiterTracker T(*this, tok::l_square);
+  T.consumeOpen();
+
+  SmallVector<DecompositionDeclarator::Binding, 32> Bindings;
+  while (Tok.isNot(tok::r_square)) {
+    if (!Bindings.empty()) {
+      if (Tok.is(tok::comma))
+        ConsumeToken();
+      else {
+        if (Tok.is(tok::identifier)) {
+          SourceLocation EndLoc = getEndOfPreviousToken();
+          Diag(EndLoc, diag::err_expected)
+              << tok::comma << FixItHint::CreateInsertion(EndLoc, ",");
+        } else {
+          Diag(Tok, diag::err_expected_comma_or_rsquare);
+        }
+
+        SkipUntil(tok::r_square, tok::comma, tok::identifier,
+                  StopAtSemi | StopBeforeMatch);
+        if (Tok.is(tok::comma))
+          ConsumeToken();
+        else if (Tok.isNot(tok::identifier))
+          break;
+      }
+    }
+
+    if (Tok.isNot(tok::identifier)) {
+      Diag(Tok, diag::err_expected) << tok::identifier;
+      break;
+    }
+
+    Bindings.push_back({Tok.getIdentifierInfo(), Tok.getLocation()});
+    ConsumeToken();
+  }
+
+  if (Tok.isNot(tok::r_square))
+    // We've already diagnosed a problem here.
+    T.skipToEnd();
+  else {
+    // C++17 does not allow the identifier-list in a structured binding
+    // to be empty.
+    if (Bindings.empty())
+      Diag(Tok.getLocation(), diag::ext_decomp_decl_empty);
+
+    T.consumeClose();
+  }
+
+  return D.setDecompositionBindings(T.getOpenLocation(), Bindings,
+                                    T.getCloseLocation());
 }
 
 /// ParseParenDeclarator - We parsed the declarator D up to a paren.  This is

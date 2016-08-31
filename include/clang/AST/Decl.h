@@ -251,7 +251,7 @@ public:
   // FIXME: Deprecated, move clients to getName().
   std::string getNameAsString() const { return Name.getAsString(); }
 
-  void printName(raw_ostream &os) const { os << Name; }
+  virtual void printName(raw_ostream &os) const;
 
   /// getDeclName - Get the actual, stored name of the declaration,
   /// which may be a special name.
@@ -789,7 +789,7 @@ public:
 
 protected:
   // A pointer union of Stmt * and EvaluatedStmt *. When an EvaluatedStmt, we
-  // have allocated the auxilliary struct of information there.
+  // have allocated the auxiliary struct of information there.
   //
   // TODO: It is a bit unfortunate to use a PointerUnion inside the VarDecl for
   // this as *many* VarDecls are ParmVarDecls that don't have default
@@ -1025,7 +1025,7 @@ public:
   ///   void foo() { int x; static int y; extern int z; }
   ///
   bool isLocalVarDecl() const {
-    if (getKind() != Decl::Var)
+    if (getKind() != Decl::Var && getKind() != Decl::Decomposition)
       return false;
     if (const DeclContext *DC = getLexicalDeclContext())
       return DC->getRedeclContext()->isFunctionOrMethod();
@@ -1040,7 +1040,7 @@ public:
   /// isFunctionOrMethodVarDecl - Similar to isLocalVarDecl, but
   /// excludes variables declared in blocks.
   bool isFunctionOrMethodVarDecl() const {
-    if (getKind() != Decl::Var)
+    if (getKind() != Decl::Var && getKind() != Decl::Decomposition)
       return false;
     const DeclContext *DC = getLexicalDeclContext()->getRedeclContext();
     return DC->isFunctionOrMethod() && DC->getDeclKind() != Decl::Block;
@@ -2271,6 +2271,14 @@ public:
   /// returns 0.
   unsigned getMemoryFunctionKind() const;
 
+  /// Add a diagnostic to be emitted if and when this function is codegen'ed.
+  void addDeferredDiag(PartialDiagnosticAt PD);
+
+  /// Gets this object's list of deferred diagnostics, if there are any.
+  ///
+  /// Although this is logically const, it clears our list of deferred diags.
+  std::vector<PartialDiagnosticAt> takeDeferredDiags() const;
+
   // Implement isa/cast/dyncast/etc.
   static bool classof(const Decl *D) { return classofKind(D->getKind()); }
   static bool classofKind(Kind K) {
@@ -2781,7 +2789,7 @@ protected:
   /// the TU.
   unsigned IsCompleteDefinitionRequired : 1;
 private:
-  SourceLocation RBraceLoc;
+  SourceRange BraceRange;
 
   // A struct representing syntactic qualifier info,
   // to be used for the (uncommon) case of out-of-line declarations.
@@ -2843,8 +2851,8 @@ public:
   using redeclarable_base::getMostRecentDecl;
   using redeclarable_base::isFirstDecl;
 
-  SourceLocation getRBraceLoc() const { return RBraceLoc; }
-  void setRBraceLoc(SourceLocation L) { RBraceLoc = L; }
+  SourceRange getBraceRange() const { return BraceRange; }
+  void setBraceRange(SourceRange R) { BraceRange = R; }
 
   /// getInnerLocStart - Return SourceLocation representing start of source
   /// range ignoring outer template declarations.

@@ -3438,15 +3438,13 @@ TreeTransform<Derived>::TransformNestedNameSpecifierLoc(
     NestedNameSpecifier *QNNS = Q.getNestedNameSpecifier();
 
     switch (QNNS->getKind()) {
-    case NestedNameSpecifier::Identifier:
-      if (SemaRef.BuildCXXNestedNameSpecifier(/*Scope=*/nullptr,
-                                              *QNNS->getAsIdentifier(),
-                                              Q.getLocalBeginLoc(),
-                                              Q.getLocalEndLoc(),
-                                              ObjectType, false, SS,
-                                              FirstQualifierInScope, false))
+    case NestedNameSpecifier::Identifier: {
+      Sema::NestedNameSpecInfo IdInfo(QNNS->getAsIdentifier(),
+                          Q.getLocalBeginLoc(), Q.getLocalEndLoc(), ObjectType);
+      if (SemaRef.BuildCXXNestedNameSpecifier(/*Scope=*/nullptr, IdInfo, false,
+                                              SS, FirstQualifierInScope, false))
         return NestedNameSpecifierLoc();
-
+    }
       break;
 
     case NestedNameSpecifier::Namespace: {
@@ -7626,6 +7624,28 @@ StmtResult TreeTransform<Derived>::TransformOMPTargetParallelForSimdDirective(
   return Res;
 }
 
+template <typename Derived>
+StmtResult TreeTransform<Derived>::TransformOMPTargetSimdDirective(
+    OMPTargetSimdDirective *D) {
+  DeclarationNameInfo DirName;
+  getDerived().getSema().StartOpenMPDSABlock(OMPD_target_simd, DirName, nullptr,
+                                             D->getLocStart());
+  StmtResult Res = getDerived().TransformOMPExecutableDirective(D);
+  getDerived().getSema().EndOpenMPDSABlock(Res.get());
+  return Res;
+}
+
+template <typename Derived>
+StmtResult TreeTransform<Derived>::TransformOMPTeamsDistributeDirective(
+    OMPTeamsDistributeDirective *D) {
+  DeclarationNameInfo DirName;
+  getDerived().getSema().StartOpenMPDSABlock(OMPD_teams_distribute, DirName,
+                                             nullptr, D->getLocStart());
+  StmtResult Res = getDerived().TransformOMPExecutableDirective(D);
+  getDerived().getSema().EndOpenMPDSABlock(Res.get());
+  return Res;
+}
+
 //===----------------------------------------------------------------------===//
 // OpenMP clause transformation
 //===----------------------------------------------------------------------===//
@@ -11110,6 +11130,12 @@ TransformObjCBridgedCastExpr(ObjCBridgedCastExpr *E) {
   return SemaRef.BuildObjCBridgedCast(E->getLParenLoc(), E->getBridgeKind(),
                                       E->getBridgeKeywordLoc(), TSInfo,
                                       Result.get());
+}
+
+template <typename Derived>
+ExprResult TreeTransform<Derived>::TransformObjCAvailabilityCheckExpr(
+    ObjCAvailabilityCheckExpr *E) {
+  return E;
 }
 
 template<typename Derived>

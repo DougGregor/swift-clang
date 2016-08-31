@@ -2084,7 +2084,7 @@ static bool isDiagnosedResult(ASTReader::ASTReadResult ARR, unsigned Caps) {
 ASTReader::ASTReadResult ASTReader::ReadOptionsBlock(
     BitstreamCursor &Stream, unsigned ClientLoadCapabilities,
     bool AllowCompatibleConfigurationMismatch, ASTReaderListener &Listener,
-    std::string &SuggestedPredefines) {
+    std::string &SuggestedPredefines, bool ValidateDiagnosticOptions) {
   if (Stream.EnterSubBlock(OPTIONS_BLOCK_ID))
     return Failure;
 
@@ -2128,7 +2128,8 @@ ASTReader::ASTReadResult ASTReader::ReadOptionsBlock(
 
     case DIAGNOSTIC_OPTIONS: {
       bool Complain = (ClientLoadCapabilities & ARR_OutOfDate) == 0;
-      if (!AllowCompatibleConfigurationMismatch &&
+      if (ValidateDiagnosticOptions &&
+          !AllowCompatibleConfigurationMismatch &&
           ParseDiagnosticOptions(Record, Complain, Listener))
         return OutOfDate;
       break;
@@ -2255,10 +2256,13 @@ ASTReader::ReadControlBlock(ModuleFile &F,
           // FIXME: Allow this for files explicitly specified with -include-pch.
           bool AllowCompatibleConfigurationMismatch =
               F.Kind == MK_ExplicitModule;
+          const HeaderSearchOptions &HSOpts =
+              PP.getHeaderSearchInfo().getHeaderSearchOpts();
 
           Result = ReadOptionsBlock(Stream, ClientLoadCapabilities,
                                     AllowCompatibleConfigurationMismatch,
-                                    *Listener, SuggestedPredefines);
+                                    *Listener, SuggestedPredefines,
+                                    HSOpts.ModulesValidateDiagnosticOptions);
           if (Result == Failure) {
             Error("malformed block record in AST file");
             return Result;
@@ -2691,8 +2695,6 @@ ASTReader::ReadASTBlock(ModuleFile &F, unsigned ClientLoadCapabilities) {
     case EAGERLY_DESERIALIZED_DECLS:
       // FIXME: Skip reading this record if our ASTConsumer doesn't care
       // about "interesting" decls (for instance, if we're building a module).
-      // FIXME: Store this somewhere per-module and defer until
-      // markModuleReferenced is called.
       for (unsigned I = 0, N = Record.size(); I != N; ++I)
         EagerlyDeserializedDecls.push_back(getGlobalDeclID(F, Record[I]));
       break;
@@ -3363,9 +3365,6 @@ void ASTReader::makeNamesVisible(const HiddenNames &Names, Module *Owner) {
 void ASTReader::makeModuleVisible(Module *Mod,
                                   Module::NameVisibilityKind NameVisibility,
                                   SourceLocation ImportLoc) {
-  // If we import anything from the module in any way, then it is used.
-  markModuleUsed(Mod);
-
   llvm::SmallPtrSet<Module *, 4> Visited;
   SmallVector<Module *, 4> Stack;
   Stack.push_back(Mod);
@@ -4200,7 +4199,7 @@ bool ASTReader::readASTFileControlBlock(
     StringRef Filename, FileManager &FileMgr,
     const PCHContainerReader &PCHContainerRdr,
     bool FindModuleFileExtensions,
-    ASTReaderListener &Listener) {
+    ASTReaderListener &Listener, bool ValidateDiagnosticOptions) {
   // Open the AST file.
   // FIXME: This allows use of the VFS; we do not allow use of the
   // VFS when actually loading a module.
@@ -4240,7 +4239,8 @@ bool ASTReader::readASTFileControlBlock(
         std::string IgnoredSuggestedPredefines;
         if (ReadOptionsBlock(Stream, ARR_ConfigurationMismatch | ARR_OutOfDate,
                              /*AllowCompatibleConfigurationMismatch*/ false,
-                             Listener, IgnoredSuggestedPredefines) != Success)
+                             Listener, IgnoredSuggestedPredefines,
+                             ValidateDiagnosticOptions) != Success)
           return true;
         break;
       }
@@ -4413,7 +4413,8 @@ bool ASTReader::isAcceptableASTFile(
                                ExistingModuleCachePath, FileMgr);
   return !readASTFileControlBlock(Filename, FileMgr, PCHContainerRdr,
                                   /*FindModuleFileExtensions=*/false,
-                                  validator);
+                                  validator,
+                                  /*ValidateDiagnosticOptions=*/true);
 }
 
 ASTReader::ASTReadResult
@@ -4680,6 +4681,13 @@ ASTReader::ReadSubmoduleBlock(ModuleFile &F, unsigned ClientLoadCapabilities) {
       UnresolvedModuleRefs.push_back(Unresolved);
       break;
     }
+
+    case SUBMODULE_INITIALIZERS:
+      SmallVector<uint32_t, 16> Inits;
+      for (auto &ID : Record)
+        Inits.push_back(getGlobalDeclID(F, ID));
+      Context.addLazyModuleInitializers(CurrentModule, Inits);
+      break;
     }
   }
 }
@@ -6734,93 +6742,8 @@ void ASTReader::PassInterestingDeclsToConsumer() {
     Decl *D = InterestingDecls.front();
     InterestingDecls.pop_front();
 
-    // If we have found an interesting ImportDecl, then its imported module
-    // is considered used.
-    if (auto *ID = dyn_cast<ImportDecl>(D))
-      markModuleUsed(ID->getImportedModule());
-
     PassInterestingDeclToConsumer(D);
   }
-}
-
-void ASTReader::markModuleUsed(Module *M) {
-  M = M->getTopLevelModule();
-  // Mark that interesting decls in this module should now be passed to the
-  // consumer, and pass any pending decls.
-  auto MInterestingDecls =
-      UnimportedModuleInterestingDecls.insert(std::make_pair(M, nullptr)).first;
-  if (auto *Decls = MInterestingDecls->second) {
-    MInterestingDecls->second = nullptr;
-    for (auto *D : *Decls) {
-      Module *Owner = D->getImportedOwningModule();
-      if (Owner)
-        Owner = Owner->getTopLevelModule();
-      if (Owner != M) {
-        // Mark that this decl has been handed to the consumer in its original
-        // module, and stop if it's already been removed from there.
-        auto OwnerIt = UnimportedModuleInterestingDecls.find(Owner);
-        if (OwnerIt == UnimportedModuleInterestingDecls.end() ||
-            !OwnerIt->second)
-          continue;
-        auto NewEnd =
-            std::remove(OwnerIt->second->begin(), OwnerIt->second->end(), D);
-        if (NewEnd == OwnerIt->second->end())
-          continue;
-        OwnerIt->second->erase(NewEnd, OwnerIt->second->end());
-      }
-      InterestingDecls.push_back(D);
-    }
-  }
-}
-
-void ASTReader::addInterestingDecl(Decl *D,
-                                   llvm::Optional<Module *> OwnerOverride) {
-  Module *Owner = D->getImportedOwningModule();
-  if (Owner)
-    Owner = Owner->getTopLevelModule();
-  Module *ExportedBy = OwnerOverride ? *OwnerOverride : Owner;
-  if (ExportedBy)
-    ExportedBy = ExportedBy->getTopLevelModule();
-
-  auto It = ExportedBy ? UnimportedModuleInterestingDecls.find(ExportedBy)
-                       : UnimportedModuleInterestingDecls.end();
-  if (It == UnimportedModuleInterestingDecls.end())
-    It = UnimportedModuleInterestingDecls.insert(
-             std::make_pair(ExportedBy, new (Context) ModuleInterestingDecls))
-         .first;
-  ModuleInterestingDecls *Interesting = It->second;
-
-  // If this declaration's module has been imported, hand it to the consumer.
-  if (!ExportedBy || !Interesting) {
-    if (Owner != ExportedBy) {
-      // Mark that this decl has been handed to the consumer in its original
-      // module, and stop if it's already been removed from there.
-      auto OwnerIt = UnimportedModuleInterestingDecls.find(Owner);
-      if (OwnerIt == UnimportedModuleInterestingDecls.end() || !OwnerIt->second)
-        return;
-      auto NewEnd =
-          std::remove(OwnerIt->second->begin(), OwnerIt->second->end(), D);
-      if (NewEnd == OwnerIt->second->end())
-        return;
-      OwnerIt->second->erase(NewEnd, OwnerIt->second->end());
-    }
-    InterestingDecls.push_back(D);
-    return;
-  }
-  assert(Owner && "re-export of unowned decl");
-
-  // If this is a re-export of another module's decl, check whether the decl
-  // has already been handed to the consumer.
-  if (Owner != ExportedBy) {
-    auto OwnerIt = UnimportedModuleInterestingDecls.find(Owner);
-    if (OwnerIt != UnimportedModuleInterestingDecls.end() &&
-        (!OwnerIt->second ||
-         std::find(OwnerIt->second->begin(), OwnerIt->second->end(), D) ==
-             OwnerIt->second->end()))
-      return;
-  }
-
-  Interesting->push_back(D);
 }
 
 void ASTReader::PassInterestingDeclToConsumer(Decl *D) {
@@ -7984,9 +7907,10 @@ ASTReader::ReadTemplateParameterList(ModuleFile &F,
   while (NumParams--)
     Params.push_back(ReadDeclAs<NamedDecl>(F, Record, Idx));
 
+  // TODO: Concepts
   TemplateParameterList* TemplateParams =
     TemplateParameterList::Create(Context, TemplateLoc, LAngleLoc,
-                                  Params, RAngleLoc);
+                                  Params, RAngleLoc, nullptr);
   return TemplateParams;
 }
 
@@ -8729,6 +8653,7 @@ void ASTReader::FinishedDeserializing() {
       auto Updates = std::move(PendingExceptionSpecUpdates);
       PendingExceptionSpecUpdates.clear();
       for (auto Update : Updates) {
+        ProcessingUpdatesRAIIObj ProcessingUpdates(*this);
         auto *FPT = Update.second->getType()->castAs<FunctionProtoType>();
         auto ESI = FPT->getExtProtoInfo().ExceptionSpec;
         if (auto *Listener = Context.getASTMutationListener())
@@ -8799,6 +8724,7 @@ ASTReader::ASTReader(
       AllowConfigurationMismatch(AllowConfigurationMismatch),
       ValidateSystemInputs(ValidateSystemInputs),
       UseGlobalIndex(UseGlobalIndex), TriedLoadingGlobalIndex(false),
+      ProcessingUpdateRecords(false),
       CurrSwitchCaseStmts(&SwitchCaseStmts), NumSLocEntriesRead(0),
       TotalNumSLocEntries(0), NumStatementsRead(0), TotalNumStatements(0),
       NumMacrosRead(0), TotalNumMacros(0), NumIdentifierLookups(0),

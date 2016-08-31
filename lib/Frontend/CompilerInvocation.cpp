@@ -7,6 +7,7 @@
 //
 //===----------------------------------------------------------------------===//
 
+#include "clang/Frontend/CompilerInvocation.h"
 #include "TestModuleFileExtension.h"
 #include "clang/Basic/Builtins.h"
 #include "clang/Basic/FileManager.h"
@@ -15,11 +16,11 @@
 #include "clang/Driver/DriverDiagnostic.h"
 #include "clang/Driver/Options.h"
 #include "clang/Driver/Util.h"
-#include "clang/Frontend/CompilerInvocation.h"
 #include "clang/Frontend/FrontendDiagnostic.h"
 #include "clang/Frontend/LangStandard.h"
 #include "clang/Frontend/Utils.h"
 #include "clang/Lex/HeaderSearchOptions.h"
+#include "clang/Lex/PreprocessorOptions.h"
 #include "clang/Serialization/ASTReader.h"
 #include "clang/Serialization/ModuleFileExtension.h"
 #include "llvm/ADT/Hashing.h"
@@ -237,6 +238,7 @@ static bool ParseAnalyzerArgs(AnalyzerOptions &Opts, ArgList &Args,
   }
 
   Opts.ShowCheckerHelp = Args.hasArg(OPT_analyzer_checker_help);
+  Opts.ShowEnabledCheckerList = Args.hasArg(OPT_analyzer_list_enabled_checkers);
   Opts.DisableAllChecks = Args.hasArg(OPT_analyzer_disable_all_checks);
 
   Opts.visualizeExplodedGraphWithGraphViz =
@@ -458,6 +460,8 @@ static bool ParseCodeGenArgs(CodeGenOptions &Opts, ArgList &Args, InputKind IK,
     StringRef Name = A->getValue();
     if (Name == "Accelerate")
       Opts.setVecLib(CodeGenOptions::Accelerate);
+    else if (Name == "SVML")
+      Opts.setVecLib(CodeGenOptions::SVML);
     else if (Name == "none")
       Opts.setVecLib(CodeGenOptions::NoLibrary);
     else
@@ -543,6 +547,7 @@ static bool ParseCodeGenArgs(CodeGenOptions &Opts, ArgList &Args, InputKind IK,
       Args.hasFlag(OPT_fcoverage_mapping, OPT_fno_coverage_mapping, false);
   Opts.DumpCoverageMapping = Args.hasArg(OPT_dump_coverage_mapping);
   Opts.AsmVerbose = Args.hasArg(OPT_masm_verbose);
+  Opts.PreserveAsmComments = !Args.hasArg(OPT_fno_preserve_as_comments);
   Opts.AssumeSaneOperatorNew = !Args.hasArg(OPT_fno_assume_sane_operator_new);
   Opts.ObjCAutoRefCountExceptions = Args.hasArg(OPT_fobjc_arc_exceptions);
   Opts.CXAAtExit = !Args.hasArg(OPT_fno_use_cxa_atexit);
@@ -566,6 +571,9 @@ static bool ParseCodeGenArgs(CodeGenOptions &Opts, ArgList &Args, InputKind IK,
                        Args.hasArg(OPT_cl_fast_relaxed_math));
   Opts.NoSignedZeros = (Args.hasArg(OPT_fno_signed_zeros) ||
                         Args.hasArg(OPT_cl_no_signed_zeros));
+  Opts.FlushDenorm = Args.hasArg(OPT_cl_denorms_are_zero);
+  Opts.CorrectlyRoundedDivSqrt =
+      Args.hasArg(OPT_cl_fp32_correctly_rounded_divide_sqrt);
   Opts.ReciprocalMath = Args.hasArg(OPT_freciprocal_math);
   Opts.NoZeroInitializedInBSS = Args.hasArg(OPT_mno_zero_initialized_in_bss);
   Opts.BackendOptions = Args.getAllArgValues(OPT_backend_option);
@@ -1362,6 +1370,8 @@ static void ParseHeaderSearchArgs(HeaderSearchOptions &Opts, ArgList &Args) {
   Opts.ModuleCachePath = Args.getLastArgValue(OPT_fmodules_cache_path);
   Opts.ModuleUserBuildPath = Args.getLastArgValue(OPT_fmodules_user_build_path);
   Opts.DisableModuleHash = Args.hasArg(OPT_fdisable_module_hash);
+  Opts.ModulesValidateDiagnosticOptions =
+      !Args.hasArg(OPT_fmodules_disable_diagnostic_validation);
   Opts.ImplicitModuleMaps = Args.hasArg(OPT_fimplicit_module_maps);
   Opts.ModuleMapFileHomeIsCwd = Args.hasArg(OPT_fmodule_map_file_home_is_cwd);
   Opts.ModuleCachePruneInterval =
@@ -1468,7 +1478,7 @@ static void ParseAPINotesArgs(APINotesOptions &Opts, ArgList &Args) {
     Opts.ModuleSearchPaths.push_back(A->getValue());
 }
 
-bool isOpenCL(LangStandard::Kind LangStd) {
+static bool isOpenCL(LangStandard::Kind LangStd) {
   return LangStd == LangStandard::lang_opencl ||
          LangStd == LangStandard::lang_opencl11 ||
          LangStd == LangStandard::lang_opencl12 ||
@@ -1879,12 +1889,13 @@ static void ParseLangArgs(LangOptions &Opts, ArgList &Args, InputKind IK,
     && Opts.OpenCLVersion >= 200);
   Opts.BlocksRuntimeOptional = Args.hasArg(OPT_fblocks_runtime_optional);
   Opts.Coroutines = Args.hasArg(OPT_fcoroutines);
-  Opts.Modules = Args.hasArg(OPT_fmodules);
+  Opts.ModulesTS = Args.hasArg(OPT_fmodules_ts);
+  Opts.Modules = Args.hasArg(OPT_fmodules) || Opts.ModulesTS;
   Opts.ModulesStrictDeclUse = Args.hasArg(OPT_fmodules_strict_decluse);
   Opts.ModulesDeclUse =
       Args.hasArg(OPT_fmodules_decluse) || Opts.ModulesStrictDeclUse;
   Opts.ModulesLocalVisibility =
-      Args.hasArg(OPT_fmodules_local_submodule_visibility);
+      Args.hasArg(OPT_fmodules_local_submodule_visibility) || Opts.ModulesTS;
   Opts.ModulesSearchAll = Opts.Modules &&
     !Args.hasArg(OPT_fno_modules_search_all) &&
     Args.hasArg(OPT_fmodules_search_all);
@@ -2411,6 +2422,13 @@ bool CompilerInvocation::CreateFromArgs(CompilerInvocation &Res,
   ParsePreprocessorArgs(Res.getPreprocessorOpts(), Args, FileMgr, Diags);
   ParsePreprocessorOutputArgs(Res.getPreprocessorOutputOpts(), Args,
                               Res.getFrontendOpts().ProgramAction);
+
+  // Turn on -Wspir-compat for SPIR target.
+  llvm::Triple T(Res.getTargetOpts().Triple);
+  auto Arch = T.getArch();
+  if (Arch == llvm::Triple::spir || Arch == llvm::Triple::spir64) {
+    Res.getDiagnosticOpts().Warnings.push_back("spir-compat");
+  }
   return Success;
 }
 
@@ -2472,7 +2490,8 @@ std::string CompilerInvocation::getModuleHash() const {
                       hsOpts.UseBuiltinIncludes,
                       hsOpts.UseStandardSystemIncludes,
                       hsOpts.UseStandardCXXIncludes,
-                      hsOpts.UseLibcxx);
+                      hsOpts.UseLibcxx,
+                      hsOpts.ModulesValidateDiagnosticOptions);
   code = hash_combine(code, hsOpts.ResourceDir);
 
   // Extend the signature with the user build path.

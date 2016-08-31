@@ -11,7 +11,6 @@
 //
 //===----------------------------------------------------------------------===//
 
-#include "clang/Sema/Initialization.h"
 #include "clang/AST/ASTContext.h"
 #include "clang/AST/DeclObjC.h"
 #include "clang/AST/ExprCXX.h"
@@ -19,13 +18,13 @@
 #include "clang/AST/TypeLoc.h"
 #include "clang/Basic/TargetInfo.h"
 #include "clang/Sema/Designator.h"
+#include "clang/Sema/Initialization.h"
 #include "clang/Sema/Lookup.h"
 #include "clang/Sema/SemaInternal.h"
 #include "llvm/ADT/APInt.h"
 #include "llvm/ADT/SmallString.h"
 #include "llvm/Support/ErrorHandling.h"
 #include "llvm/Support/raw_ostream.h"
-#include <map>
 
 using namespace clang;
 
@@ -937,6 +936,7 @@ static void warnBracedScalarInit(Sema &S, const InitializedEntity &Entity,
   case InitializedEntity::EK_Base:
   case InitializedEntity::EK_Delegating:
   case InitializedEntity::EK_BlockElement:
+  case InitializedEntity::EK_Binding:
     llvm_unreachable("unexpected braced scalar init");
   }
 
@@ -2896,6 +2896,7 @@ DeclarationName InitializedEntity::getName() const {
 
   case EK_Variable:
   case EK_Member:
+  case EK_Binding:
     return VariableOrMember->getDeclName();
 
   case EK_LambdaCapture:
@@ -2919,10 +2920,11 @@ DeclarationName InitializedEntity::getName() const {
   llvm_unreachable("Invalid EntityKind!");
 }
 
-DeclaratorDecl *InitializedEntity::getDecl() const {
+ValueDecl *InitializedEntity::getDecl() const {
   switch (getKind()) {
   case EK_Variable:
   case EK_Member:
+  case EK_Binding:
     return VariableOrMember;
 
   case EK_Parameter:
@@ -2958,6 +2960,7 @@ bool InitializedEntity::allowsNRVO() const {
   case EK_Parameter:
   case EK_Parameter_CF_Audited:
   case EK_Member:
+  case EK_Binding:
   case EK_New:
   case EK_Temporary:
   case EK_CompoundLiteralInit:
@@ -2989,6 +2992,7 @@ unsigned InitializedEntity::dumpImpl(raw_ostream &OS) const {
   case EK_Result: OS << "Result"; break;
   case EK_Exception: OS << "Exception"; break;
   case EK_Member: OS << "Member"; break;
+  case EK_Binding: OS << "Binding"; break;
   case EK_New: OS << "New"; break;
   case EK_Temporary: OS << "Temporary"; break;
   case EK_CompoundLiteralInit: OS << "CompoundLiteral";break;
@@ -3005,9 +3009,9 @@ unsigned InitializedEntity::dumpImpl(raw_ostream &OS) const {
     break;
   }
 
-  if (Decl *D = getDecl()) {
+  if (auto *D = getDecl()) {
     OS << " ";
-    cast<NamedDecl>(D)->printQualifiedName(OS);
+    D->printQualifiedName(OS);
   }
 
   OS << " '" << getType().getAsString() << "'\n";
@@ -4886,7 +4890,8 @@ static bool TryOCLSamplerInitialization(Sema &S,
                                         QualType DestType,
                                         Expr *Initializer) {
   if (!S.getLangOpts().OpenCL || !DestType->isSamplerT() ||
-    !Initializer->isIntegerConstantExpr(S.getASTContext()))
+      (!Initializer->isIntegerConstantExpr(S.Context) &&
+      !Initializer->getType()->isSamplerT()))
     return false;
 
   Sequence.AddOCLSamplerInitStep(DestType);
@@ -5270,6 +5275,7 @@ getAssignmentAction(const InitializedEntity &Entity, bool Diagnose = false) {
     return Sema::AA_Casting;
 
   case InitializedEntity::EK_Member:
+  case InitializedEntity::EK_Binding:
   case InitializedEntity::EK_ArrayElement:
   case InitializedEntity::EK_VectorElement:
   case InitializedEntity::EK_ComplexElement:
@@ -5305,6 +5311,7 @@ static bool shouldBindAsTemporary(const InitializedEntity &Entity) {
   case InitializedEntity::EK_Parameter_CF_Audited:
   case InitializedEntity::EK_Temporary:
   case InitializedEntity::EK_RelatedResult:
+  case InitializedEntity::EK_Binding:
     return true;
   }
 
@@ -5326,6 +5333,7 @@ static bool shouldDestroyTemporary(const InitializedEntity &Entity) {
       return false;
 
     case InitializedEntity::EK_Member:
+    case InitializedEntity::EK_Binding:
     case InitializedEntity::EK_Variable:
     case InitializedEntity::EK_Parameter:
     case InitializedEntity::EK_Parameter_CF_Audited:
@@ -5395,6 +5403,7 @@ static SourceLocation getInitializationLoc(const InitializedEntity &Entity,
     return Entity.getThrowLoc();
 
   case InitializedEntity::EK_Variable:
+  case InitializedEntity::EK_Binding:
     return Entity.getDecl()->getLocation();
 
   case InitializedEntity::EK_LambdaCapture:
@@ -5826,6 +5835,7 @@ InitializedEntityOutlivesFullExpression(const InitializedEntity &Entity) {
   case InitializedEntity::EK_Result:
   case InitializedEntity::EK_Exception:
   case InitializedEntity::EK_Member:
+  case InitializedEntity::EK_Binding:
   case InitializedEntity::EK_New:
   case InitializedEntity::EK_Base:
   case InitializedEntity::EK_Delegating:
@@ -5873,6 +5883,11 @@ static const InitializedEntity *getEntityForTemporaryLifetimeExtension(
     //   except:
     //   -- A temporary bound to a reference member in a constructor's
     //      ctor-initializer persists until the constructor exits.
+    return Entity;
+
+  case InitializedEntity::EK_Binding:
+    // Per [dcl.decomp]p3, the binding is treated as a variable of reference
+    // type.
     return Entity;
 
   case InitializedEntity::EK_Parameter:
@@ -6250,7 +6265,7 @@ InitializationSequence::Perform(Sema &S,
           SourceRange Brackets;
 
           // Scavange the location of the brackets from the entity, if we can.
-          if (DeclaratorDecl *DD = Entity.getDecl()) {
+          if (auto *DD = dyn_cast_or_null<DeclaratorDecl>(Entity.getDecl())) {
             if (TypeSourceInfo *TInfo = DD->getTypeSourceInfo()) {
               TypeLoc TL = TInfo->getTypeLoc();
               if (IncompleteArrayTypeLoc ArrayLoc =
@@ -6645,12 +6660,16 @@ InitializationSequence::Perform(Sema &S,
                                     getAssignmentAction(Entity), CCK);
       if (CurInitExprRes.isInvalid())
         return ExprError();
+
+      S.DiscardMisalignedMemberAddress(Step->Type.getTypePtr(), CurInit.get());
+
       CurInit = CurInitExprRes;
 
       if (Step->Kind == SK_ConversionSequenceNoNarrowing &&
           S.getLangOpts().CPlusPlus && !CurInit.get()->isValueDependent())
         DiagnoseNarrowingInInitList(S, *Step->ICS, SourceType, Entity.getType(),
                                     CurInit.get());
+
       break;
     }
 
@@ -6904,19 +6923,93 @@ InitializationSequence::Perform(Sema &S,
     }
 
     case SK_OCLSamplerInit: {
-      assert(Step->Type->isSamplerT() && 
+      // Sampler initialzation have 5 cases:
+      //   1. function argument passing
+      //      1a. argument is a file-scope variable
+      //      1b. argument is a function-scope variable
+      //      1c. argument is one of caller function's parameters
+      //   2. variable initialization
+      //      2a. initializing a file-scope variable
+      //      2b. initializing a function-scope variable
+      //
+      // For file-scope variables, since they cannot be initialized by function
+      // call of __translate_sampler_initializer in LLVM IR, their references
+      // need to be replaced by a cast from their literal initializers to
+      // sampler type. Since sampler variables can only be used in function
+      // calls as arguments, we only need to replace them when handling the
+      // argument passing.
+      assert(Step->Type->isSamplerT() &&
              "Sampler initialization on non-sampler type.");
-
-      QualType SourceType = CurInit.get()->getType();
-
+      Expr *Init = CurInit.get();
+      QualType SourceType = Init->getType();
+      // Case 1
       if (Entity.isParameterKind()) {
-        if (!SourceType->isSamplerT())
+        if (!SourceType->isSamplerT()) {
           S.Diag(Kind.getLocation(), diag::err_sampler_argument_required)
             << SourceType;
-      } else if (Entity.getKind() != InitializedEntity::EK_Variable) {
-        llvm_unreachable("Invalid EntityKind!");
+          break;
+        } else if (const DeclRefExpr *DRE = dyn_cast<DeclRefExpr>(Init)) {
+          auto Var = cast<VarDecl>(DRE->getDecl());
+          // Case 1b and 1c
+          // No cast from integer to sampler is needed.
+          if (!Var->hasGlobalStorage()) {
+            CurInit = ImplicitCastExpr::Create(S.Context, Step->Type,
+                                               CK_LValueToRValue, Init,
+                                               /*BasePath=*/nullptr, VK_RValue);
+            break;
+          }
+          // Case 1a
+          // For function call with a file-scope sampler variable as argument,
+          // get the integer literal.
+          // Do not diagnose if the file-scope variable does not have initializer
+          // since this has already been diagnosed when parsing the variable
+          // declaration.
+          if (!Var->getInit() || !isa<ImplicitCastExpr>(Var->getInit()))
+            break;
+          Init = cast<ImplicitCastExpr>(const_cast<Expr*>(
+            Var->getInit()))->getSubExpr();
+          SourceType = Init->getType();
+        }
+      } else {
+        // Case 2
+        // Check initializer is 32 bit integer constant.
+        // If the initializer is taken from global variable, do not diagnose since
+        // this has already been done when parsing the variable declaration.
+        if (!Init->isConstantInitializer(S.Context, false))
+          break;
+        
+        if (!SourceType->isIntegerType() ||
+            32 != S.Context.getIntWidth(SourceType)) {
+          S.Diag(Kind.getLocation(), diag::err_sampler_initializer_not_integer)
+            << SourceType;
+          break;
+        }
+
+        llvm::APSInt Result;
+        Init->EvaluateAsInt(Result, S.Context);
+        const uint64_t SamplerValue = Result.getLimitedValue();
+        // 32-bit value of sampler's initializer is interpreted as
+        // bit-field with the following structure:
+        // |unspecified|Filter|Addressing Mode| Normalized Coords|
+        // |31        6|5    4|3             1|                 0|
+        // This structure corresponds to enum values of sampler properties
+        // defined in SPIR spec v1.2 and also opencl-c.h
+        unsigned AddressingMode  = (0x0E & SamplerValue) >> 1;
+        unsigned FilterMode      = (0x30 & SamplerValue) >> 4;
+        if (FilterMode != 1 && FilterMode != 2)
+          S.Diag(Kind.getLocation(),
+                 diag::warn_sampler_initializer_invalid_bits)
+                 << "Filter Mode";
+        if (AddressingMode > 4)
+          S.Diag(Kind.getLocation(),
+                 diag::warn_sampler_initializer_invalid_bits)
+                 << "Addressing Mode";
       }
 
+      // Cases 1a, 2a and 2b
+      // Insert cast from integer to sampler.
+      CurInit = S.ImpCastExprToType(Init, S.Context.OCLSamplerTy,
+                                      CK_IntToOCLSampler);
       break;
     }
     case SK_OCLZeroEvent: {

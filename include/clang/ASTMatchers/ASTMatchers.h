@@ -51,7 +51,6 @@
 #include "clang/AST/DeclTemplate.h"
 #include "clang/ASTMatchers/ASTMatchersInternal.h"
 #include "clang/ASTMatchers/ASTMatchersMacros.h"
-#include "llvm/ADT/Twine.h"
 #include "llvm/Support/Regex.h"
 #include <iterator>
 
@@ -447,6 +446,17 @@ const internal::VariadicAllOfMatcher<CXXCtorInitializer> cxxCtorInitializer;
 ///   matches 'int' in C<int>.
 const internal::VariadicAllOfMatcher<TemplateArgument> templateArgument;
 
+/// \brief Matches template name.
+///
+/// Given
+/// \code
+///   template <typename T> class X { };
+///   X<int> xi;
+/// \endcode
+/// templateName()
+///   matches 'X' in X<int>.
+const internal::VariadicAllOfMatcher<TemplateName> templateName;
+
 /// \brief Matches non-type template parameter declarations.
 ///
 /// Given
@@ -557,22 +567,32 @@ AST_MATCHER(Decl, isImplicit) {
   return Node.isImplicit();
 }
 
-/// \brief Matches classTemplateSpecializations that have at least one
-/// TemplateArgument matching the given InnerMatcher.
+/// \brief Matches classTemplateSpecializations, templateSpecializationType and
+/// functionDecl that have at least one TemplateArgument matching the given
+/// InnerMatcher.
 ///
 /// Given
 /// \code
 ///   template<typename T> class A {};
 ///   template<> class A<double> {};
 ///   A<int> a;
+///
+///   template<typename T> f() {};
+///   void func() { f<int>(); };
+/// \endcode
+///
 /// \endcode
 /// classTemplateSpecializationDecl(hasAnyTemplateArgument(
 ///     refersToType(asString("int"))))
 ///   matches the specialization \c A<int>
+///
+/// functionDecl(hasAnyTemplateArgument(refersToType(asString("int"))))
+///   matches the specialization \c f<int>
 AST_POLYMORPHIC_MATCHER_P(
     hasAnyTemplateArgument,
     AST_POLYMORPHIC_SUPPORTED_TYPES(ClassTemplateSpecializationDecl,
-                                    TemplateSpecializationType),
+                                    TemplateSpecializationType,
+                                    FunctionDecl),
     internal::Matcher<TemplateArgument>, InnerMatcher) {
   ArrayRef<TemplateArgument> List =
       internal::getTemplateSpecializationArgs(Node);
@@ -699,22 +719,29 @@ AST_MATCHER_P(QualType, ignoringParens,
   return InnerMatcher.matches(Node.IgnoreParens(), Finder, Builder);
 }
 
-/// \brief Matches classTemplateSpecializations where the n'th TemplateArgument
-/// matches the given InnerMatcher.
+/// \brief Matches classTemplateSpecializations, templateSpecializationType and
+/// functionDecl where the n'th TemplateArgument matches the given InnerMatcher.
 ///
 /// Given
 /// \code
 ///   template<typename T, typename U> class A {};
 ///   A<bool, int> b;
 ///   A<int, bool> c;
+///
+///   template<typename T> f() {};
+///   void func() { f<int>(); };
 /// \endcode
 /// classTemplateSpecializationDecl(hasTemplateArgument(
 ///     1, refersToType(asString("int"))))
 ///   matches the specialization \c A<bool, int>
+///
+/// functionDecl(hasTemplateArgument(0, refersToType(asString("int"))))
+///   matches the specialization \c f<int>
 AST_POLYMORPHIC_MATCHER_P2(
     hasTemplateArgument,
     AST_POLYMORPHIC_SUPPORTED_TYPES(ClassTemplateSpecializationDecl,
-                                    TemplateSpecializationType),
+                                    TemplateSpecializationType,
+                                    FunctionDecl),
     unsigned, N, internal::Matcher<TemplateArgument>, InnerMatcher) {
   ArrayRef<TemplateArgument> List =
       internal::getTemplateSpecializationArgs(Node);
@@ -756,6 +783,24 @@ AST_MATCHER_P(TemplateArgument, refersToType,
   if (Node.getKind() != TemplateArgument::Type)
     return false;
   return InnerMatcher.matches(Node.getAsType(), Finder, Builder);
+}
+
+/// \brief Matches a TemplateArgument that refers to a certain template.
+///
+/// Given
+/// \code
+///   template<template <typename> class S> class X {};
+///   template<typename T> class Y {};"
+///   X<Y> xi;
+/// \endcode
+/// classTemplateSpecializationDecl(hasAnyTemplateArgument(
+///     refersToTemplate(templateName())))
+///   matches the specialization \c X<Y>
+AST_MATCHER_P(TemplateArgument, refersToTemplate,
+              internal::Matcher<TemplateName>, InnerMatcher) {
+  if (Node.getKind() != TemplateArgument::Template)
+    return false;
+  return InnerMatcher.matches(Node.getAsTemplate(), Finder, Builder);
 }
 
 /// \brief Matches a canonical TemplateArgument that refers to a certain
@@ -2423,6 +2468,25 @@ hasDeclaration(const internal::Matcher<Decl> &InnerMatcher) {
       void(internal::HasDeclarationSupportedTypes)>(InnerMatcher);
 }
 
+/// \brief Matches a \c NamedDecl whose underlying declaration matches the given
+/// matcher.
+///
+/// Given
+/// \code
+///   namespace N { template<class T> void f(T t); }
+///   template <class T> void g() { using N::f; f(T()); }
+/// \endcode
+/// \c unresolvedLookupExpr(hasAnyDeclaration(
+///     namedDecl(hasUnderlyingDecl(hasName("::N::f")))))
+///   matches the use of \c f in \c g() .
+AST_MATCHER_P(NamedDecl, hasUnderlyingDecl, internal::Matcher<NamedDecl>,
+              InnerMatcher) {
+  const NamedDecl *UnderlyingDecl = Node.getUnderlyingDecl();
+
+  return UnderlyingDecl != nullptr &&
+         InnerMatcher.matches(*UnderlyingDecl, Finder, Builder);
+}
+
 /// \brief Matches on the implicit object argument of a member call expression.
 ///
 /// Example matches y.x()
@@ -2776,6 +2840,27 @@ AST_MATCHER_P(DeclRefExpr, throughUsingDecl,
   if (const UsingShadowDecl *UsingDecl = dyn_cast<UsingShadowDecl>(FoundDecl))
     return InnerMatcher.matches(*UsingDecl, Finder, Builder);
   return false;
+}
+
+/// \brief Matches an \c OverloadExpr if any of the declarations in the set of
+/// overloads matches the given matcher.
+///
+/// Given
+/// \code
+///   template <typename T> void foo(T);
+///   template <typename T> void bar(T);
+///   template <typename T> void baz(T t) {
+///     foo(t);
+///     bar(t);
+///   }
+/// \endcode
+/// unresolvedLookupExpr(hasAnyDeclaration(
+///     functionTemplateDecl(hasName("foo"))))
+///   matches \c foo in \c foo(t); but not \c bar in \c bar(t);
+AST_MATCHER_P(OverloadExpr, hasAnyDeclaration, internal::Matcher<Decl>,
+              InnerMatcher) {
+  return matchesFirstInPointerRange(InnerMatcher, Node.decls_begin(),
+                                    Node.decls_end(), Finder, Builder);
 }
 
 /// \brief Matches the Decl of a DeclStmt which has a single declaration.
@@ -3297,7 +3382,8 @@ AST_MATCHER_P(FunctionDecl, returns,
 /// \endcode
 /// functionDecl(isExternC())
 ///   matches the declaration of f and g, but not the declaration h
-AST_MATCHER(FunctionDecl, isExternC) {
+AST_POLYMORPHIC_MATCHER(isExternC, AST_POLYMORPHIC_SUPPORTED_TYPES(FunctionDecl,
+                                                                   VarDecl)) {
   return Node.isExternC();
 }
 

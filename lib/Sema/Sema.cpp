@@ -12,7 +12,6 @@
 //
 //===----------------------------------------------------------------------===//
 
-#include "clang/Sema/SemaInternal.h"
 #include "clang/AST/ASTContext.h"
 #include "clang/AST/ASTDiagnostic.h"
 #include "clang/AST/DeclCXX.h"
@@ -22,7 +21,6 @@
 #include "clang/AST/ExprCXX.h"
 #include "clang/AST/StmtCXX.h"
 #include "clang/Basic/DiagnosticOptions.h"
-#include "clang/Basic/FileManager.h"
 #include "clang/Basic/PartialDiagnostic.h"
 #include "clang/Basic/TargetInfo.h"
 #include "clang/Lex/HeaderSearch.h"
@@ -30,14 +28,15 @@
 #include "clang/Sema/CXXFieldCollector.h"
 #include "clang/Sema/DelayedDiagnostic.h"
 #include "clang/Sema/ExternalSemaSource.h"
+#include "clang/Sema/Initialization.h"
 #include "clang/Sema/MultiplexExternalSemaSource.h"
 #include "clang/Sema/ObjCMethodList.h"
 #include "clang/Sema/PrettyDeclStackTrace.h"
 #include "clang/Sema/Scope.h"
 #include "clang/Sema/ScopeInfo.h"
 #include "clang/Sema/SemaConsumer.h"
+#include "clang/Sema/SemaInternal.h"
 #include "clang/Sema/TemplateDeduction.h"
-#include "llvm/ADT/APFloat.h"
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/SmallSet.h"
 using namespace clang;
@@ -812,6 +811,7 @@ void Sema::ActOnEndOfTranslationUnit() {
                                    diag::err_tentative_def_incomplete_type))
       VD->setInvalidDecl();
 
+    // No initialization is performed for a tentative definition.
     CheckCompleteVariableDeclaration(VD);
 
     // Notify the consumer that we've completed a tentative definition.

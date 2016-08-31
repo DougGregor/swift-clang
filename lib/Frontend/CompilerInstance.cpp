@@ -30,6 +30,7 @@
 #include "clang/Lex/HeaderSearch.h"
 #include "clang/Lex/PTHManager.h"
 #include "clang/Lex/Preprocessor.h"
+#include "clang/Lex/PreprocessorOptions.h"
 #include "clang/Sema/CodeCompleteConsumer.h"
 #include "clang/Sema/Sema.h"
 #include "clang/Serialization/ASTReader.h"
@@ -859,6 +860,9 @@ bool CompilerInstance::ExecuteAction(FrontendAction &Act) {
   // FIXME: We shouldn't need to do this, the target should be immutable once
   // created. This complexity should be lifted elsewhere.
   getTarget().adjust(getLangOpts());
+
+  // Adjust target options based on codegen options.
+  getTarget().adjustTargetOptions(getCodeGenOpts(), getTargetOpts());
 
   // rewriter project will change target built-in bool type from its default. 
   if (getFrontendOpts().ProgramAction == frontend::RewriteObjC)

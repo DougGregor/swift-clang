@@ -12,7 +12,6 @@
 //
 //===----------------------------------------------------------------------===//
 
-#include "clang/Sema/SemaInternal.h"
 #include "clang/AST/ASTContext.h"
 #include "clang/AST/CharUnits.h"
 #include "clang/AST/DeclCXX.h"
@@ -33,14 +32,14 @@
 #include "clang/Sema/Lookup.h"
 #include "clang/Sema/ScopeInfo.h"
 #include "clang/Sema/Sema.h"
+#include "clang/Sema/SemaInternal.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/SmallBitVector.h"
 #include "llvm/ADT/SmallString.h"
+#include "llvm/Support/ConvertUTF.h"
 #include "llvm/Support/Format.h"
 #include "llvm/Support/Locale.h"
-#include "llvm/Support/ConvertUTF.h"
 #include "llvm/Support/raw_ostream.h"
-#include <limits>
 
 using namespace clang;
 using namespace sema;
@@ -1604,6 +1603,56 @@ bool Sema::CheckX86BuiltinFunctionCall(unsigned BuiltinID, CallExpr *TheCall) {
     return SemaBuiltinCpuSupports(*this, TheCall);
   case X86::BI__builtin_ms_va_start:
     return SemaBuiltinMSVAStart(TheCall);
+  case X86::BI__builtin_ia32_addcarryx_u64:
+  case X86::BI__builtin_ia32_addcarry_u64:
+  case X86::BI__builtin_ia32_subborrow_u64:
+  case X86::BI__builtin_ia32_readeflags_u64:
+  case X86::BI__builtin_ia32_writeeflags_u64:
+  case X86::BI__builtin_ia32_bextr_u64:
+  case X86::BI__builtin_ia32_bextri_u64:
+  case X86::BI__builtin_ia32_bzhi_di:
+  case X86::BI__builtin_ia32_pdep_di:
+  case X86::BI__builtin_ia32_pext_di:
+  case X86::BI__builtin_ia32_crc32di:
+  case X86::BI__builtin_ia32_fxsave64:
+  case X86::BI__builtin_ia32_fxrstor64:
+  case X86::BI__builtin_ia32_xsave64:
+  case X86::BI__builtin_ia32_xrstor64:
+  case X86::BI__builtin_ia32_xsaveopt64:
+  case X86::BI__builtin_ia32_xrstors64:
+  case X86::BI__builtin_ia32_xsavec64:
+  case X86::BI__builtin_ia32_xsaves64:
+  case X86::BI__builtin_ia32_rdfsbase64:
+  case X86::BI__builtin_ia32_rdgsbase64:
+  case X86::BI__builtin_ia32_wrfsbase64:
+  case X86::BI__builtin_ia32_wrgsbase64:
+  case X86::BI__builtin_ia32_pbroadcastq512_gpr_mask:
+  case X86::BI__builtin_ia32_pbroadcastq256_gpr_mask:
+  case X86::BI__builtin_ia32_pbroadcastq128_gpr_mask:
+  case X86::BI__builtin_ia32_vcvtsd2si64:
+  case X86::BI__builtin_ia32_vcvtsd2usi64:
+  case X86::BI__builtin_ia32_vcvtss2si64:
+  case X86::BI__builtin_ia32_vcvtss2usi64:
+  case X86::BI__builtin_ia32_vcvttsd2si64:
+  case X86::BI__builtin_ia32_vcvttsd2usi64:
+  case X86::BI__builtin_ia32_vcvttss2si64:
+  case X86::BI__builtin_ia32_vcvttss2usi64:
+  case X86::BI__builtin_ia32_cvtss2si64:
+  case X86::BI__builtin_ia32_cvttss2si64:
+  case X86::BI__builtin_ia32_cvtsd2si64:
+  case X86::BI__builtin_ia32_cvttsd2si64:
+  case X86::BI__builtin_ia32_cvtsi2sd64:
+  case X86::BI__builtin_ia32_cvtsi2ss64:
+  case X86::BI__builtin_ia32_cvtusi2sd64:
+  case X86::BI__builtin_ia32_cvtusi2ss64:
+  case X86::BI__builtin_ia32_rdseed64_step: {
+    // These builtins only work on x86-64 targets.
+    const llvm::Triple &TT = Context.getTargetInfo().getTriple();
+    if (TT.getArch() != llvm::Triple::x86_64)
+      return Diag(TheCall->getCallee()->getLocStart(),
+                  diag::err_x86_builtin_32_bit_tgt);
+    return false;
+  }
   case X86::BI__builtin_ia32_extractf64x4_mask:
   case X86::BI__builtin_ia32_extracti64x4_mask:
   case X86::BI__builtin_ia32_extractf32x8_mask:
@@ -2405,7 +2454,11 @@ ExprResult Sema::SemaAtomicOpsOverloaded(ExprResult TheCallResult,
 
   // Inspect the first argument of the atomic operation.
   Expr *Ptr = TheCall->getArg(0);
-  Ptr = DefaultFunctionArrayLvalueConversion(Ptr).get();
+  ExprResult ConvertedPtr = DefaultFunctionArrayLvalueConversion(Ptr);
+  if (ConvertedPtr.isInvalid())
+    return ExprError();
+
+  Ptr = ConvertedPtr.get();
   const PointerType *pointerType = Ptr->getType()->getAs<PointerType>();
   if (!pointerType) {
     Diag(DRE->getLocStart(), diag::err_atomic_builtin_must_be_pointer)
@@ -6291,13 +6344,15 @@ void Sema::CheckMemaccessArguments(const CallExpr *Call,
 
   // It is possible to have a non-standard definition of memset.  Validate
   // we have enough arguments, and if not, abort further checking.
-  unsigned ExpectedNumArgs = (BId == Builtin::BIstrndup ? 2 : 3);
+  unsigned ExpectedNumArgs =
+      (BId == Builtin::BIstrndup || BId == Builtin::BIbzero ? 2 : 3);
   if (Call->getNumArgs() < ExpectedNumArgs)
     return;
 
-  unsigned LastArg = (BId == Builtin::BImemset ||
+  unsigned LastArg = (BId == Builtin::BImemset || BId == Builtin::BIbzero ||
                       BId == Builtin::BIstrndup ? 1 : 2);
-  unsigned LenArg = (BId == Builtin::BIstrndup ? 1 : 2);
+  unsigned LenArg =
+      (BId == Builtin::BIbzero || BId == Builtin::BIstrndup ? 1 : 2);
   const Expr *LenExpr = Call->getArg(LenArg)->IgnoreParenImpCasts();
 
   if (CheckMemorySizeofForComparison(*this, LenExpr, FnName,
@@ -6308,6 +6363,13 @@ void Sema::CheckMemaccessArguments(const CallExpr *Call,
   QualType SizeOfArgTy = getSizeOfArgType(LenExpr);
   const Expr *SizeOfArg = getSizeOfExprArg(LenExpr);
   llvm::FoldingSetNodeID SizeOfArgID;
+
+  // Although widely used, 'bzero' is not a standard function. Be more strict
+  // with the argument types before allowing diagnostics and only allow the
+  // form bzero(ptr, sizeof(...)).
+  QualType FirstArgTy = Call->getArg(0)->IgnoreParenImpCasts()->getType();
+  if (BId == Builtin::BIbzero && !FirstArgTy->getAs<PointerType>())
+    return;
 
   for (unsigned ArgIdx = 0; ArgIdx != LastArg; ++ArgIdx) {
     const Expr *Dest = Call->getArg(ArgIdx)->IgnoreParenImpCasts();
@@ -6684,6 +6746,12 @@ CheckReturnStackAddr(Sema &S, Expr *RetValExp, QualType lhsType,
   if (!stackE)
     return; // Nothing suspicious was found.
 
+  // Parameters are initalized in the calling scope, so taking the address
+  // of a parameter reference doesn't need a warning.
+  for (auto *DRE : refVars)
+    if (isa<ParmVarDecl>(DRE->getDecl()))
+      return;
+
   SourceLocation diagLoc;
   SourceRange diagRange;
   if (refVars.empty()) {
@@ -6707,6 +6775,13 @@ CheckReturnStackAddr(Sema &S, Expr *RetValExp, QualType lhsType,
   } else if (isa<AddrLabelExpr>(stackE)) { // address of label.
     S.Diag(diagLoc, diag::warn_ret_addr_label) << diagRange;
   } else { // local temporary.
+    // If there is an LValue->RValue conversion, then the value of the
+    // reference type is used, not the reference.
+    if (auto *ICE = dyn_cast<ImplicitCastExpr>(RetValExp)) {
+      if (ICE->getCastKind() == CK_LValueToRValue) {
+        return;
+      }
+    }
     S.Diag(diagLoc, diag::warn_ret_local_temp_addr_ref)
      << lhsType->isReferenceType() << diagRange;
   }
@@ -7937,6 +8012,12 @@ bool AnalyzeBitFieldAssignment(Sema &S, FieldDecl *Bitfield, Expr *Init,
   unsigned OriginalWidth = Value.getBitWidth();
   unsigned FieldWidth = Bitfield->getBitWidthValue(S.Context);
 
+  if (Value.isSigned() && Value.isNegative())
+    if (UnaryOperator *UO = dyn_cast<UnaryOperator>(OriginalInit))
+      if (UO->getOpcode() == UO_Minus)
+        if (isa<IntegerLiteral>(UO->getSubExpr()))
+          OriginalWidth = Value.getMinSignedBits();
+
   if (OriginalWidth <= FieldWidth)
     return false;
 
@@ -8466,6 +8547,8 @@ void CheckImplicitConversion(Sema &S, Expr *E, QualType T,
   }
 
   DiagnoseNullConversion(S, E, T, CC);
+
+  S.DiscardMisalignedMemberAddress(Target, E);
 
   if (!Source->isIntegerType() || !Target->isIntegerType())
     return;
@@ -9533,9 +9616,11 @@ void Sema::CheckUnsequencedOperations(Expr *E) {
 void Sema::CheckCompletedExpr(Expr *E, SourceLocation CheckLoc,
                               bool IsConstexpr) {
   CheckImplicitConversions(E, CheckLoc);
-  CheckUnsequencedOperations(E);
+  if (!E->isInstantiationDependent())
+    CheckUnsequencedOperations(E);
   if (!IsConstexpr && !E->isValueDependent())
     CheckForIntOverflow(E);
+  DiagnoseMisalignedMembers();
 }
 
 void Sema::CheckBitFieldInitialization(SourceLocation InitLoc,
@@ -11081,3 +11166,67 @@ void Sema::CheckArgumentWithTypeTag(const ArgumentWithTypeTagAttr *Attr,
         << ArgumentExpr->getSourceRange()
         << TypeTagExpr->getSourceRange();
 }
+
+void Sema::AddPotentialMisalignedMembers(Expr *E, RecordDecl *RD, ValueDecl *MD,
+                                         CharUnits Alignment) {
+  MisalignedMembers.emplace_back(E, RD, MD, Alignment);
+}
+
+void Sema::DiagnoseMisalignedMembers() {
+  for (MisalignedMember &m : MisalignedMembers) {
+    Diag(m.E->getLocStart(), diag::warn_taking_address_of_packed_member)
+        << m.MD << m.RD << m.E->getSourceRange();
+  }
+  MisalignedMembers.clear();
+}
+
+void Sema::DiscardMisalignedMemberAddress(const Type *T, Expr *E) {
+  if (!T->isPointerType())
+    return;
+  if (isa<UnaryOperator>(E) &&
+      cast<UnaryOperator>(E)->getOpcode() == UO_AddrOf) {
+    auto *Op = cast<UnaryOperator>(E)->getSubExpr()->IgnoreParens();
+    if (isa<MemberExpr>(Op)) {
+      auto MA = std::find(MisalignedMembers.begin(), MisalignedMembers.end(),
+                          MisalignedMember(Op));
+      if (MA != MisalignedMembers.end() &&
+          Context.getTypeAlignInChars(T->getPointeeType()) <= MA->Alignment)
+        MisalignedMembers.erase(MA);
+    }
+  }
+}
+
+void Sema::RefersToMemberWithReducedAlignment(
+    Expr *E,
+    std::function<void(Expr *, RecordDecl *, ValueDecl *, CharUnits)> Action) {
+  const auto *ME = dyn_cast<MemberExpr>(E);
+  while (ME && isa<FieldDecl>(ME->getMemberDecl())) {
+    QualType BaseType = ME->getBase()->getType();
+    if (ME->isArrow())
+      BaseType = BaseType->getPointeeType();
+    RecordDecl *RD = BaseType->getAs<RecordType>()->getDecl();
+
+    ValueDecl *MD = ME->getMemberDecl();
+    bool ByteAligned = Context.getTypeAlignInChars(MD->getType()).isOne();
+    if (ByteAligned) // Attribute packed does not have any effect.
+      break;
+
+    if (!ByteAligned &&
+        (RD->hasAttr<PackedAttr>() || (MD->hasAttr<PackedAttr>()))) {
+      CharUnits Alignment = std::min(Context.getTypeAlignInChars(MD->getType()),
+                                     Context.getTypeAlignInChars(BaseType));
+      // Notify that this expression designates a member with reduced alignment
+      Action(E, RD, MD, Alignment);
+      break;
+    }
+    ME = dyn_cast<MemberExpr>(ME->getBase());
+  }
+}
+
+void Sema::CheckAddressOfPackedMember(Expr *rhs) {
+  using namespace std::placeholders;
+  RefersToMemberWithReducedAlignment(
+      rhs, std::bind(&Sema::AddPotentialMisalignedMembers, std::ref(*this), _1,
+                     _2, _3, _4));
+}
+

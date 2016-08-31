@@ -16,6 +16,7 @@
 #define LLVM_CLANG_SEMA_SEMA_H
 
 #include "clang/AST/Attr.h"
+#include "clang/AST/Availability.h"
 #include "clang/AST/DeclarationName.h"
 #include "clang/AST/Expr.h"
 #include "clang/AST/ExprObjC.h"
@@ -73,6 +74,7 @@ namespace clang {
   class ASTWriter;
   class ArrayType;
   class AttributeList;
+  class BindingDecl;
   class BlockDecl;
   class CapturedDecl;
   class CXXBasePath;
@@ -1409,8 +1411,14 @@ private:
   bool RequireCompleteTypeImpl(SourceLocation Loc, QualType T,
                                TypeDiagnoser *Diagnoser);
 
+  struct ModuleScope {
+    clang::Module *Module;
+    VisibleModuleSet OuterVisibleModules;
+  };
+  /// The modules we're currently parsing.
+  llvm::SmallVector<ModuleScope, 16> ModuleScopes;
+
   VisibleModuleSet VisibleModules;
-  llvm::SmallVector<VisibleModuleSet, 16> VisibleModulesStack;
 
   Module *CachedFakeTopLevelModule;
 
@@ -1732,11 +1740,16 @@ public:
                                      TypeSourceInfo *TInfo,
                                      LookupResult &Previous,
                                      MultiTemplateParamsArg TemplateParamLists,
-                                     bool &AddToScope);
+                                     bool &AddToScope,
+                                     ArrayRef<BindingDecl *> Bindings = None);
+  NamedDecl *
+  ActOnDecompositionDeclarator(Scope *S, Declarator &D,
+                               MultiTemplateParamsArg TemplateParamLists);
   // Returns true if the variable declaration is a redeclaration
   bool CheckVariableDeclaration(VarDecl *NewVD, LookupResult &Previous);
   void CheckVariableDeclarationType(VarDecl *NewVD);
-  void CheckCompleteVariableDeclaration(VarDecl *var);
+  void CheckCompleteVariableDeclaration(VarDecl *VD);
+  void CheckCompleteDecompositionDeclaration(DecompositionDecl *DD);
   void MaybeSuggestAddingStaticToDecl(const FunctionDecl *D);
 
   NamedDecl* ActOnFunctionDeclarator(Scope* S, Declarator& D, DeclContext* DC,
@@ -2059,7 +2072,7 @@ public:
   /// ActOnTagFinishDefinition - Invoked once we have finished parsing
   /// the definition of a tag (enumeration, class, struct, or union).
   void ActOnTagFinishDefinition(Scope *S, Decl *TagDecl,
-                                SourceLocation RBraceLoc);
+                                SourceRange BraceRange);
 
   void ActOnTagFinishSkippedDefinition(SkippedDefinitionContext Context);
 
@@ -2096,8 +2109,8 @@ public:
                           SourceLocation IdLoc, IdentifierInfo *Id,
                           AttributeList *Attrs,
                           SourceLocation EqualLoc, Expr *Val);
-  void ActOnEnumBody(SourceLocation EnumLoc, SourceLocation LBraceLoc,
-                     SourceLocation RBraceLoc, Decl *EnumDecl,
+  void ActOnEnumBody(SourceLocation EnumLoc, SourceRange BraceRange,
+                     Decl *EnumDecl,
                      ArrayRef<Decl *> Elements,
                      Scope *S, AttributeList *Attr);
 
@@ -3647,13 +3660,10 @@ public:
 
   void redelayDiagnostics(sema::DelayedDiagnosticPool &pool);
 
-  enum AvailabilityDiagnostic { AD_Deprecation, AD_Unavailable, AD_Partial };
-
-  void EmitAvailabilityWarning(AvailabilityDiagnostic AD,
-                               NamedDecl *D, StringRef Message,
-                               SourceLocation Loc,
+  void EmitAvailabilityWarning(AvailabilityResult AR, NamedDecl *D,
+                               StringRef Message, SourceLocation Loc,
                                const ObjCInterfaceDecl *UnknownObjCClass,
-                               const ObjCPropertyDecl  *ObjCProperty,
+                               const ObjCPropertyDecl *ObjCProperty,
                                bool ObjCPropertyAccess);
 
   bool makeUnavailableInSystemHeader(SourceLocation loc,
@@ -3990,6 +4000,12 @@ public:
                            const Scope *S,
                            bool SuppressQualifierCheck = false,
                            ActOnMemberAccessExtraArgs *ExtraArgs = nullptr);
+
+  ExprResult BuildFieldReferenceExpr(Expr *BaseExpr, bool IsArrow,
+                                     SourceLocation OpLoc,
+                                     const CXXScopeSpec &SS, FieldDecl *Field,
+                                     DeclAccessPair FoundDecl,
+                                     const DeclarationNameInfo &MemberNameInfo);
 
   ExprResult PerformMemberExprBaseConversion(Expr *Base, bool IsArrow);
 
@@ -4769,6 +4785,10 @@ public:
   /// ActOnObjCBoolLiteral - Parse {__objc_yes,__objc_no} literals.
   ExprResult ActOnObjCBoolLiteral(SourceLocation OpLoc, tok::TokenKind Kind);
 
+  ExprResult
+  ActOnObjCAvailabilityCheckExpr(llvm::ArrayRef<AvailabilitySpec> AvailSpecs,
+                                 SourceLocation AtLoc, SourceLocation RParen);
+
   /// ActOnCXXNullPtrLiteral - Parse 'nullptr'.
   ExprResult ActOnCXXNullPtrLiteral(SourceLocation Loc);
 
@@ -4971,16 +4991,41 @@ public:
                                        bool *CanCorrect = nullptr);
   NamedDecl *FindFirstQualifierInScope(Scope *S, NestedNameSpecifier *NNS);
 
+  /// \brief Keeps information about an identifier in a nested-name-spec.
+  ///
+  struct NestedNameSpecInfo {
+    /// \brief The type of the object, if we're parsing nested-name-specifier in
+    /// a member access expression.
+    ParsedType ObjectType;
+
+    /// \brief The identifier preceding the '::'.
+    IdentifierInfo *Identifier;
+
+    /// \brief The location of the identifier.
+    SourceLocation IdentifierLoc;
+
+    /// \brief The location of the '::'.
+    SourceLocation CCLoc;
+
+    /// \brief Creates info object for the most typical case.
+    NestedNameSpecInfo(IdentifierInfo *II, SourceLocation IdLoc,
+             SourceLocation ColonColonLoc, ParsedType ObjectType = ParsedType())
+      : ObjectType(ObjectType), Identifier(II), IdentifierLoc(IdLoc),
+        CCLoc(ColonColonLoc) {
+    }
+
+    NestedNameSpecInfo(IdentifierInfo *II, SourceLocation IdLoc,
+                       SourceLocation ColonColonLoc, QualType ObjectType)
+      : ObjectType(ParsedType::make(ObjectType)), Identifier(II),
+        IdentifierLoc(IdLoc), CCLoc(ColonColonLoc) {
+    }
+  };
+
   bool isNonTypeNestedNameSpecifier(Scope *S, CXXScopeSpec &SS,
-                                    SourceLocation IdLoc,
-                                    IdentifierInfo &II,
-                                    ParsedType ObjectType);
+                                    NestedNameSpecInfo &IdInfo);
 
   bool BuildCXXNestedNameSpecifier(Scope *S,
-                                   IdentifierInfo &Identifier,
-                                   SourceLocation IdentifierLoc,
-                                   SourceLocation CCLoc,
-                                   QualType ObjectType,
+                                   NestedNameSpecInfo &IdInfo,
                                    bool EnteringContext,
                                    CXXScopeSpec &SS,
                                    NamedDecl *ScopeLookupResult,
@@ -4991,14 +5036,8 @@ public:
   ///
   /// \param S The scope in which this nested-name-specifier occurs.
   ///
-  /// \param Identifier The identifier preceding the '::'.
-  ///
-  /// \param IdentifierLoc The location of the identifier.
-  ///
-  /// \param CCLoc The location of the '::'.
-  ///
-  /// \param ObjectType The type of the object, if we're parsing
-  /// nested-name-specifier in a member access expression.
+  /// \param IdInfo Parser information about an identifier in the
+  /// nested-name-spec.
   ///
   /// \param EnteringContext Whether we're entering the context nominated by
   /// this nested-name-specifier.
@@ -5017,10 +5056,7 @@ public:
   ///
   /// \returns true if an error occurred, false otherwise.
   bool ActOnCXXNestedNameSpecifier(Scope *S,
-                                   IdentifierInfo &Identifier,
-                                   SourceLocation IdentifierLoc,
-                                   SourceLocation CCLoc,
-                                   ParsedType ObjectType,
+                                   NestedNameSpecInfo &IdInfo,
                                    bool EnteringContext,
                                    CXXScopeSpec &SS,
                                    bool ErrorRecoveryLookup = false,
@@ -5033,10 +5069,7 @@ public:
                                            SourceLocation ColonColonLoc);
 
   bool IsInvalidUnlessNestedName(Scope *S, CXXScopeSpec &SS,
-                                 IdentifierInfo &Identifier,
-                                 SourceLocation IdentifierLoc,
-                                 SourceLocation ColonLoc,
-                                 ParsedType ObjectType,
+                                 NestedNameSpecInfo &IdInfo,
                                  bool EnteringContext);
 
   /// \brief The parser has parsed a nested-name-specifier
@@ -5775,6 +5808,10 @@ public:
                                 unsigned NumOuterTemplateParamLists,
                             TemplateParameterList **OuterTemplateParamLists,
                                 SkipBodyInfo *SkipBody = nullptr);
+
+  TemplateArgumentLoc getTrivialTemplateArgumentLoc(const TemplateArgument &Arg,
+                                                    QualType NTTPType,
+                                                    SourceLocation Loc);
 
   void translateTemplateArguments(const ASTTemplateArgsPtr &In,
                                   TemplateArgumentListInfo &Out);
@@ -8265,6 +8302,18 @@ public:
       ArrayRef<OMPClause *> Clauses, Stmt *AStmt, SourceLocation StartLoc,
       SourceLocation EndLoc,
       llvm::DenseMap<ValueDecl *, Expr *> &VarsWithImplicitDSA);
+  /// \brief Called on well-formed '\#pragma omp target simd' after parsing of
+  /// the associated statement.
+  StmtResult ActOnOpenMPTargetSimdDirective(
+      ArrayRef<OMPClause *> Clauses, Stmt *AStmt, SourceLocation StartLoc,
+      SourceLocation EndLoc,
+      llvm::DenseMap<ValueDecl *, Expr *> &VarsWithImplicitDSA);
+  /// Called on well-formed '\#pragma omp teams distribute' after parsing of
+  /// the associated statement.
+  StmtResult ActOnOpenMPTeamsDistributeDirective(
+      ArrayRef<OMPClause *> Clauses, Stmt *AStmt, SourceLocation StartLoc,
+      SourceLocation EndLoc,
+      llvm::DenseMap<ValueDecl *, Expr *> &VarsWithImplicitDSA);
 
   /// Checks correctness of linear modifiers.
   bool CheckOpenMPLinearModifier(OpenMPLinearClauseKind LinKind,
@@ -9141,8 +9190,7 @@ public:
     CFP_Never,      // Invalid caller/callee combination.
     CFP_WrongSide,  // Calls from host-device to host or device
                     // function that do not match current compilation
-                    // mode. Only in effect if
-                    // LangOpts.CUDADisableTargetCallChecks is true.
+                    // mode.
     CFP_HostDevice, // Any calls to host/device functions.
     CFP_SameSide,   // Calls from host-device to host or device
                     // function matching current compilation mode.
@@ -9160,15 +9208,31 @@ public:
                                                 const FunctionDecl *Callee);
 
   /// Determines whether Caller may invoke Callee, based on their CUDA
-  /// host/device attributes.  Returns true if the call is not allowed.
-  bool CheckCUDATarget(const FunctionDecl *Caller, const FunctionDecl *Callee) {
-    return IdentifyCUDAPreference(Caller, Callee) == CFP_Never;
+  /// host/device attributes.  Returns false if the call is not allowed.
+  ///
+  /// Note: Will return true for CFP_WrongSide calls.  These may appear in
+  /// semantically correct CUDA programs, but only if they're never codegen'ed.
+  bool IsAllowedCUDACall(const FunctionDecl *Caller,
+                         const FunctionDecl *Callee) {
+    return IdentifyCUDAPreference(Caller, Callee) != CFP_Never;
   }
 
   /// May add implicit CUDAHostAttr and CUDADeviceAttr attributes to FD,
   /// depending on FD and the current compilation settings.
   void maybeAddCUDAHostDeviceAttrs(Scope *S, FunctionDecl *FD,
                                    const LookupResult &Previous);
+
+  /// Check whether we're allowed to call Callee from the current context.
+  ///
+  /// If the call is never allowed in a semantically-correct program
+  /// (CFP_Never), emits an error and returns false.
+  ///
+  /// If the call is allowed in semantically-correct programs, but only if it's
+  /// never codegen'ed (CFP_WrongSide), creates a deferred diagnostic to be
+  /// emitted if and when the caller is codegen'ed, and returns true.
+  ///
+  /// Otherwise, returns true without emitting any diagnostics.
+  bool CheckCUDACall(SourceLocation Loc, FunctionDecl *Callee);
 
   /// Finds a function in \p Matches with highest calling priority
   /// from \p Caller context and erases all functions with lower
@@ -9557,6 +9621,10 @@ private:
   void CheckArgumentWithTypeTag(const ArgumentWithTypeTagAttr *Attr,
                                 const Expr * const *ExprArgs);
 
+  /// \brief Check if we are taking the address of a packed field
+  /// as this may be a problem if the pointer value is dereferenced.
+  void CheckAddressOfPackedMember(Expr *rhs);
+
   /// \brief The parser's current scope.
   ///
   /// The parser maintains this state here.
@@ -9614,7 +9682,23 @@ public:
   }
 
   AvailabilityResult getCurContextAvailability() const;
-  
+
+  /// \brief Get the verison that this context implies.
+  /// For instance, a method in an interface that is annotated with an
+  /// availability attribuite effectively has the availability of the interface.
+  VersionTuple getVersionForDecl(const Decl *Ctx) const;
+
+  /// \brief The diagnostic we should emit for \c D, or \c AR_Available.
+  ///
+  /// \param D The declaration to check. Note that this may be altered to point
+  /// to another declaration that \c D gets it's availability from. i.e., we
+  /// walk the list of typedefs to find an availability attribute.
+  ///
+  /// \param ContextVersion The version to compare availability against.
+  AvailabilityResult
+  ShouldDiagnoseAvailabilityOfDecl(NamedDecl *&D, VersionTuple ContextVersion,
+                                   std::string *Message);
+
   const DeclContext *getCurObjCLexicalContext() const {
     const DeclContext *DC = getCurLexicalContext();
     // A category implicitly has the attribute of the interface.
@@ -9636,6 +9720,51 @@ public:
   // Emitting members of dllexported classes is delayed until the class
   // (including field initializers) is fully parsed.
   SmallVector<CXXRecordDecl*, 4> DelayedDllExportClasses;
+
+private:
+  /// \brief Helper class that collects misaligned member designations and
+  /// their location info for delayed diagnostics.
+  struct MisalignedMember {
+    Expr *E;
+    RecordDecl *RD;
+    ValueDecl *MD;
+    CharUnits Alignment;
+
+    MisalignedMember() : E(), RD(), MD(), Alignment() {}
+    MisalignedMember(Expr *E, RecordDecl *RD, ValueDecl *MD,
+                     CharUnits Alignment)
+        : E(E), RD(RD), MD(MD), Alignment(Alignment) {}
+    explicit MisalignedMember(Expr *E)
+        : MisalignedMember(E, nullptr, nullptr, CharUnits()) {}
+
+    bool operator==(const MisalignedMember &m) { return this->E == m.E; }
+  };
+  /// \brief Small set of gathered accesses to potentially misaligned members
+  /// due to the packed attribute.
+  SmallVector<MisalignedMember, 4> MisalignedMembers;
+
+  /// \brief Adds an expression to the set of gathered misaligned members.
+  void AddPotentialMisalignedMembers(Expr *E, RecordDecl *RD, ValueDecl *MD,
+                                     CharUnits Alignment);
+
+public:
+  /// \brief Diagnoses the current set of gathered accesses. This typically
+  /// happens at full expression level. The set is cleared after emitting the
+  /// diagnostics.
+  void DiagnoseMisalignedMembers();
+
+  /// \brief This function checks if the expression is in the sef of potentially
+  /// misaligned members and it is converted to some pointer type T with lower
+  /// or equal alignment requirements.  If so it removes it. This is used when
+  /// we do not want to diagnose such misaligned access (e.g. in conversions to void*).
+  void DiscardMisalignedMemberAddress(const Type *T, Expr *E);
+
+  /// \brief This function calls Action when it determines that E designates a
+  /// misaligned member due to the packed attribute. This is used to emit
+  /// local diagnostics like in reference binding.
+  void RefersToMemberWithReducedAlignment(
+      Expr *E,
+      std::function<void(Expr *, RecordDecl *, ValueDecl *, CharUnits)> Action);
 };
 
 /// \brief RAII object that enters a new expression evaluation context.

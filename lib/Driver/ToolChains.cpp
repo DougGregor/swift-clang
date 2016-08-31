@@ -176,13 +176,6 @@ Darwin::~Darwin() {}
 
 MachO::~MachO() {}
 
-std::string MachO::ComputeEffectiveClangTriple(const ArgList &Args,
-                                               types::ID InputType) const {
-  llvm::Triple Triple(ComputeLLVMTriple(Args, InputType));
-
-  return Triple.getTriple();
-}
-
 std::string Darwin::ComputeEffectiveClangTriple(const ArgList &Args,
                                                 types::ID InputType) const {
   llvm::Triple Triple(ComputeLLVMTriple(Args, InputType));
@@ -400,17 +393,22 @@ void DarwinClang::AddLinkSanitizerLibArgs(const ArgList &Args,
       /*AddRPath*/ true);
 }
 
+ToolChain::RuntimeLibType DarwinClang::GetRuntimeLibType(
+    const ArgList &Args) const {
+  if (Arg* A = Args.getLastArg(options::OPT_rtlib_EQ)) {
+    StringRef Value = A->getValue();
+    if (Value != "compiler-rt")
+      getDriver().Diag(diag::err_drv_unsupported_rtlib_for_platform)
+          << Value << "darwin";
+  }
+
+  return ToolChain::RLT_CompilerRT;
+}
+
 void DarwinClang::AddLinkRuntimeLibArgs(const ArgList &Args,
                                         ArgStringList &CmdArgs) const {
-  // Darwin only supports the compiler-rt based runtime libraries.
-  switch (GetRuntimeLibType(Args)) {
-  case ToolChain::RLT_CompilerRT:
-    break;
-  default:
-    getDriver().Diag(diag::err_drv_unsupported_rtlib_for_platform)
-        << Args.getLastArg(options::OPT_rtlib_EQ)->getValue() << "darwin";
-    return;
-  }
+  // Call once to ensure diagnostic is printed if wrong value was specified
+  GetRuntimeLibType(Args);
 
   // Darwin doesn't support real static executables, don't link any runtime
   // libraries with -static.
@@ -1513,8 +1511,8 @@ bool Generic_GCC::GCCInstallationDetector::getBiarchSibling(Multilib &M) const {
                                             "mips-mti-linux-gnu",
                                             "mips-img-linux-gnu"};
   static const char *const MIPSELLibDirs[] = {"/lib"};
-  static const char *const MIPSELTriples[] = {
-      "mipsel-linux-gnu", "mipsel-linux-android", "mips-img-linux-gnu"};
+  static const char *const MIPSELTriples[] = {"mipsel-linux-gnu",
+                                              "mips-img-linux-gnu"};
 
   static const char *const MIPS64LibDirs[] = {"/lib64", "/lib"};
   static const char *const MIPS64Triples[] = {
@@ -1523,7 +1521,15 @@ bool Generic_GCC::GCCInstallationDetector::getBiarchSibling(Multilib &M) const {
   static const char *const MIPS64ELLibDirs[] = {"/lib64", "/lib"};
   static const char *const MIPS64ELTriples[] = {
       "mips64el-linux-gnu", "mips-mti-linux-gnu", "mips-img-linux-gnu",
-      "mips64el-linux-android", "mips64el-linux-gnuabi64"};
+      "mips64el-linux-gnuabi64"};
+
+  static const char *const MIPSELAndroidLibDirs[] = {"/lib", "/libr2",
+                                                     "/libr6"};
+  static const char *const MIPSELAndroidTriples[] = {"mipsel-linux-android"};
+  static const char *const MIPS64ELAndroidLibDirs[] = {"/lib64", "/lib",
+                                                       "/libr2", "/libr6"};
+  static const char *const MIPS64ELAndroidTriples[] = {
+      "mips64el-linux-android"};
 
   static const char *const PPCLibDirs[] = {"/lib32", "/lib"};
   static const char *const PPCTriples[] = {
@@ -1625,11 +1631,22 @@ bool Generic_GCC::GCCInstallationDetector::getBiarchSibling(Multilib &M) const {
     BiarchTripleAliases.append(begin(MIPS64Triples), end(MIPS64Triples));
     break;
   case llvm::Triple::mipsel:
-    LibDirs.append(begin(MIPSELLibDirs), end(MIPSELLibDirs));
-    TripleAliases.append(begin(MIPSELTriples), end(MIPSELTriples));
-    TripleAliases.append(begin(MIPSTriples), end(MIPSTriples));
-    BiarchLibDirs.append(begin(MIPS64ELLibDirs), end(MIPS64ELLibDirs));
-    BiarchTripleAliases.append(begin(MIPS64ELTriples), end(MIPS64ELTriples));
+    if (TargetTriple.isAndroid()) {
+      LibDirs.append(begin(MIPSELAndroidLibDirs), end(MIPSELAndroidLibDirs));
+      TripleAliases.append(begin(MIPSELAndroidTriples),
+                           end(MIPSELAndroidTriples));
+      BiarchLibDirs.append(begin(MIPS64ELAndroidLibDirs),
+                           end(MIPS64ELAndroidLibDirs));
+      BiarchTripleAliases.append(begin(MIPS64ELAndroidTriples),
+                                 end(MIPS64ELAndroidTriples));
+
+    } else {
+      LibDirs.append(begin(MIPSELLibDirs), end(MIPSELLibDirs));
+      TripleAliases.append(begin(MIPSELTriples), end(MIPSELTriples));
+      TripleAliases.append(begin(MIPSTriples), end(MIPSTriples));
+      BiarchLibDirs.append(begin(MIPS64ELLibDirs), end(MIPS64ELLibDirs));
+      BiarchTripleAliases.append(begin(MIPS64ELTriples), end(MIPS64ELTriples));
+    }
     break;
   case llvm::Triple::mips64:
     LibDirs.append(begin(MIPS64LibDirs), end(MIPS64LibDirs));
@@ -1638,11 +1655,23 @@ bool Generic_GCC::GCCInstallationDetector::getBiarchSibling(Multilib &M) const {
     BiarchTripleAliases.append(begin(MIPSTriples), end(MIPSTriples));
     break;
   case llvm::Triple::mips64el:
-    LibDirs.append(begin(MIPS64ELLibDirs), end(MIPS64ELLibDirs));
-    TripleAliases.append(begin(MIPS64ELTriples), end(MIPS64ELTriples));
-    BiarchLibDirs.append(begin(MIPSELLibDirs), end(MIPSELLibDirs));
-    BiarchTripleAliases.append(begin(MIPSELTriples), end(MIPSELTriples));
-    BiarchTripleAliases.append(begin(MIPSTriples), end(MIPSTriples));
+    if (TargetTriple.isAndroid()) {
+      LibDirs.append(begin(MIPS64ELAndroidLibDirs),
+                     end(MIPS64ELAndroidLibDirs));
+      TripleAliases.append(begin(MIPS64ELAndroidTriples),
+                           end(MIPS64ELAndroidTriples));
+      BiarchLibDirs.append(begin(MIPSELAndroidLibDirs),
+                           end(MIPSELAndroidLibDirs));
+      BiarchTripleAliases.append(begin(MIPSELAndroidTriples),
+                                 end(MIPSELAndroidTriples));
+
+    } else {
+      LibDirs.append(begin(MIPS64ELLibDirs), end(MIPS64ELLibDirs));
+      TripleAliases.append(begin(MIPS64ELTriples), end(MIPS64ELTriples));
+      BiarchLibDirs.append(begin(MIPSELLibDirs), end(MIPSELLibDirs));
+      BiarchTripleAliases.append(begin(MIPSELTriples), end(MIPSELTriples));
+      BiarchTripleAliases.append(begin(MIPSTriples), end(MIPSTriples));
+    }
     break;
   case llvm::Triple::ppc:
     LibDirs.append(begin(PPCLibDirs), end(PPCLibDirs));
@@ -1701,8 +1730,8 @@ static CudaVersion ParseCudaVersionFile(llvm::StringRef V) {
   int Major = -1, Minor = -1;
   auto First = V.split('.');
   auto Second = First.second.split('.');
-  if (!First.first.getAsInteger(10, Major) ||
-      !Second.first.getAsInteger(10, Minor))
+  if (First.first.getAsInteger(10, Major) ||
+      Second.first.getAsInteger(10, Minor))
     return CudaVersion::UNKNOWN;
 
   if (Major == 7 && Minor == 0) {
@@ -1762,22 +1791,32 @@ void Generic_GCC::CudaInstallationDetector::init(
           LibDeviceName.size(), FileName.find('.', LibDeviceName.size()));
       LibDeviceMap[GpuArch] = FilePath.str();
       // Insert map entries for specifc devices with this compute capability.
+      // NVCC's choice of libdevice library version is rather peculiar:
+      // http://docs.nvidia.com/cuda/libdevice-users-guide/basic-usage.html#version-selection
+      // TODO: this will need to be updated once CUDA-8 is released.
       if (GpuArch == "compute_20") {
         LibDeviceMap["sm_20"] = FilePath;
         LibDeviceMap["sm_21"] = FilePath;
+        LibDeviceMap["sm_32"] = FilePath;
       } else if (GpuArch == "compute_30") {
         LibDeviceMap["sm_30"] = FilePath;
-        LibDeviceMap["sm_32"] = FilePath;
+        // compute_30 is the fallback libdevice variant for sm_30+,
+        // unless CUDA specifies different version for specific GPU
+        // arch.
+        LibDeviceMap["sm_50"] = FilePath;
+        LibDeviceMap["sm_52"] = FilePath;
+        LibDeviceMap["sm_53"] = FilePath;
+        // sm_6? are currently all aliases for sm_53 in LLVM and
+        // should use compute_30.
+        LibDeviceMap["sm_60"] = FilePath;
+        LibDeviceMap["sm_61"] = FilePath;
+        LibDeviceMap["sm_62"] = FilePath;
       } else if (GpuArch == "compute_35") {
         LibDeviceMap["sm_35"] = FilePath;
         LibDeviceMap["sm_37"] = FilePath;
       } else if (GpuArch == "compute_50") {
-        LibDeviceMap["sm_50"] = FilePath;
-        LibDeviceMap["sm_52"] = FilePath;
-        LibDeviceMap["sm_53"] = FilePath;
-        LibDeviceMap["sm_60"] = FilePath;
-        LibDeviceMap["sm_61"] = FilePath;
-        LibDeviceMap["sm_62"] = FilePath;
+        // NVCC does not use compute_50 libdevice at all at the moment.
+        // The version that's shipped with CUDA-7.5 is a copy of compute_30.
       }
     }
 
@@ -1980,7 +2019,8 @@ static bool findMipsCsMultilibs(const Multilib::flags_list &Flags,
   return false;
 }
 
-static bool findMipsAndroidMultilibs(const Multilib::flags_list &Flags,
+static bool findMipsAndroidMultilibs(vfs::FileSystem &VFS, StringRef Path,
+                                     const Multilib::flags_list &Flags,
                                      FilterNonExistent &NonExistent,
                                      DetectedMultilibs &Result) {
 
@@ -1990,8 +2030,29 @@ static bool findMipsAndroidMultilibs(const Multilib::flags_list &Flags,
           .Maybe(Multilib("/mips-r6").flag("+march=mips32r6"))
           .FilterOut(NonExistent);
 
-  if (AndroidMipsMultilibs.select(Flags, Result.SelectedMultilib)) {
-    Result.Multilibs = AndroidMipsMultilibs;
+  MultilibSet AndroidMipselMultilibs =
+      MultilibSet()
+          .Either(Multilib().flag("+march=mips32"),
+                  Multilib("/mips-r2", "", "/mips-r2").flag("+march=mips32r2"),
+                  Multilib("/mips-r6", "", "/mips-r6").flag("+march=mips32r6"))
+          .FilterOut(NonExistent);
+
+  MultilibSet AndroidMips64elMultilibs =
+      MultilibSet()
+          .Either(
+              Multilib().flag("+march=mips64r6"),
+              Multilib("/32/mips-r1", "", "/mips-r1").flag("+march=mips32"),
+              Multilib("/32/mips-r2", "", "/mips-r2").flag("+march=mips32r2"),
+              Multilib("/32/mips-r6", "", "/mips-r6").flag("+march=mips32r6"))
+          .FilterOut(NonExistent);
+
+  MultilibSet *MS = &AndroidMipsMultilibs;
+  if (VFS.exists(Path + "/mips-r6"))
+    MS = &AndroidMipselMultilibs;
+  else if (VFS.exists(Path + "/32"))
+    MS = &AndroidMips64elMultilibs;
+  if (MS->select(Flags, Result.SelectedMultilib)) {
+    Result.Multilibs = *MS;
     return true;
   }
   return false;
@@ -2318,6 +2379,7 @@ static bool findMIPSMultilibs(const Driver &D, const llvm::Triple &TargetTriple,
   addMultilibFlag(CPUName == "mips64r2" || CPUName == "mips64r3" ||
                       CPUName == "mips64r5" || CPUName == "octeon",
                   "march=mips64r2", Flags);
+  addMultilibFlag(CPUName == "mips64r6", "march=mips64r6", Flags);
   addMultilibFlag(isMicroMips(Args), "mmicromips", Flags);
   addMultilibFlag(tools::mips::isUCLibc(Args), "muclibc", Flags);
   addMultilibFlag(tools::mips::isNaN2008(Args, TargetTriple), "mnan=2008",
@@ -2330,7 +2392,8 @@ static bool findMIPSMultilibs(const Driver &D, const llvm::Triple &TargetTriple,
   addMultilibFlag(!isMipsEL(TargetArch), "EB", Flags);
 
   if (TargetTriple.isAndroid())
-    return findMipsAndroidMultilibs(Flags, NonExistent, Result);
+    return findMipsAndroidMultilibs(D.getVFS(), Path, Flags, NonExistent,
+                                    Result);
 
   if (TargetTriple.getVendor() == llvm::Triple::MipsTechnologies &&
       TargetTriple.getOS() == llvm::Triple::Linux &&
@@ -3281,6 +3344,19 @@ Tool *CloudABI::buildLinker() const {
   return new tools::cloudabi::Linker(*this);
 }
 
+bool CloudABI::isPIEDefault() const {
+  // Only enable PIE on architectures that support PC-relative
+  // addressing. PC-relative addressing is required, as the process
+  // startup code must be able to relocate itself.
+  switch (getTriple().getArch()) {
+  case llvm::Triple::aarch64:
+  case llvm::Triple::x86_64:
+    return true;
+  default:
+    return false;
+  }
+}
+
 SanitizerMask CloudABI::getSupportedSanitizers() const {
   SanitizerMask Res = ToolChain::getSupportedSanitizers();
   Res |= SanitizerKind::SafeStack;
@@ -3726,6 +3802,7 @@ enum Distro {
   UbuntuVivid,
   UbuntuWily,
   UbuntuXenial,
+  UbuntuYakkety,
   UnknownDistro
 };
 
@@ -3740,7 +3817,7 @@ static bool IsDebian(enum Distro Distro) {
 }
 
 static bool IsUbuntu(enum Distro Distro) {
-  return Distro >= UbuntuHardy && Distro <= UbuntuXenial;
+  return Distro >= UbuntuHardy && Distro <= UbuntuYakkety;
 }
 
 static Distro DetectDistro(const Driver &D, llvm::Triple::ArchType Arch) {
@@ -3771,6 +3848,7 @@ static Distro DetectDistro(const Driver &D, llvm::Triple::ArchType Arch) {
                       .Case("vivid", UbuntuVivid)
                       .Case("wily", UbuntuWily)
                       .Case("xenial", UbuntuXenial)
+                      .Case("yakkety", UbuntuYakkety)
                       .Default(UnknownDistro);
     if (Version != UnknownDistro)
       return Version;
@@ -3934,6 +4012,15 @@ static std::string getMultiarchTriple(const Driver &D,
 
 static StringRef getOSLibDir(const llvm::Triple &Triple, const ArgList &Args) {
   if (isMipsArch(Triple.getArch())) {
+    if (Triple.isAndroid()) {
+      StringRef CPUName;
+      StringRef ABIName;
+      tools::mips::getMipsCPUAndABI(Args, Triple, CPUName, ABIName);
+      if (CPUName == "mips32r6")
+        return "libr6";
+      if (CPUName == "mips32r2")
+        return "libr2";
+    }
     // lib32 directory has a special meaning on MIPS targets.
     // It contains N32 ABI binaries. Use this folder if produce
     // code for N32 ABI only.
@@ -4200,19 +4287,28 @@ std::string Linux::getDynamicLinker(const ArgList &Args) const {
 
   if (Triple.isAndroid())
     return Triple.isArch64Bit() ? "/system/bin/linker64" : "/system/bin/linker";
-  else if (Triple.isMusl()) {
+
+  if (Triple.isMusl()) {
     std::string ArchName;
+    bool IsArm = false;
+
     switch (Arch) {
+    case llvm::Triple::arm:
     case llvm::Triple::thumb:
       ArchName = "arm";
+      IsArm = true;
       break;
+    case llvm::Triple::armeb:
     case llvm::Triple::thumbeb:
       ArchName = "armeb";
+      IsArm = true;
       break;
     default:
       ArchName = Triple.getArchName().str();
     }
-    if (Triple.getEnvironment() == llvm::Triple::MuslEABIHF)
+    if (IsArm &&
+        (Triple.getEnvironment() == llvm::Triple::MuslEABIHF ||
+         tools::arm::getARMFloatABI(*this, Args) == tools::arm::FloatABI::Hard))
       ArchName += "hf";
 
     return "/lib/ld-musl-" + ArchName + ".so.1";
@@ -4695,18 +4791,23 @@ CudaToolChain::addClangTargetOptions(const llvm::opt::ArgList &DriverArgs,
   if (DriverArgs.hasArg(options::OPT_nocudalib))
     return;
 
-  std::string LibDeviceFile = CudaInstallation.getLibDeviceFile(
-      DriverArgs.getLastArgValue(options::OPT_march_EQ));
-  if (!LibDeviceFile.empty()) {
-    CC1Args.push_back("-mlink-cuda-bitcode");
-    CC1Args.push_back(DriverArgs.MakeArgString(LibDeviceFile));
+  StringRef GpuArch = DriverArgs.getLastArgValue(options::OPT_march_EQ);
+  assert(!GpuArch.empty() && "Must have an explicit GPU arch.");
+  std::string LibDeviceFile = CudaInstallation.getLibDeviceFile(GpuArch);
 
-    // Libdevice in CUDA-7.0 requires PTX version that's more recent
-    // than LLVM defaults to. Use PTX4.2 which is the PTX version that
-    // came with CUDA-7.0.
-    CC1Args.push_back("-target-feature");
-    CC1Args.push_back("+ptx42");
+  if (LibDeviceFile.empty()) {
+    getDriver().Diag(diag::err_drv_no_cuda_libdevice) << GpuArch;
+    return;
   }
+
+  CC1Args.push_back("-mlink-cuda-bitcode");
+  CC1Args.push_back(DriverArgs.MakeArgString(LibDeviceFile));
+
+  // Libdevice in CUDA-7.0 requires PTX version that's more recent
+  // than LLVM defaults to. Use PTX4.2 which is the PTX version that
+  // came with CUDA-7.0.
+  CC1Args.push_back("-target-feature");
+  CC1Args.push_back("+ptx42");
 }
 
 void CudaToolChain::AddCudaIncludeArgs(const ArgList &DriverArgs,
@@ -4861,21 +4962,15 @@ MyriadToolChain::MyriadToolChain(const Driver &D, const llvm::Triple &Triple,
 
   if (GCCInstallation.isValid()) {
     // The contents of LibDir are independent of the version of gcc.
-    // This contains libc, libg (a superset of libc), libm, libstdc++, libssp.
+    // This contains libc, libg, libm, libstdc++, libssp.
+    // The 'ma1x00' and 'nofpu' variants are irrelevant.
     SmallString<128> LibDir(GCCInstallation.getParentLibPath());
-    if (Triple.getArch() == llvm::Triple::sparcel)
-      llvm::sys::path::append(LibDir, "../sparc-myriad-elf/lib/le");
-    else
-      llvm::sys::path::append(LibDir, "../sparc-myriad-elf/lib");
+    llvm::sys::path::append(LibDir, "../sparc-myriad-elf/lib");
     addPathIfExists(D, LibDir, getFilePaths());
 
     // This directory contains crt{i,n,begin,end}.o as well as libgcc.
     // These files are tied to a particular version of gcc.
     SmallString<128> CompilerSupportDir(GCCInstallation.getInstallPath());
-    // There are actually 4 choices: {le,be} x {fpu,nofpu}
-    // but as this toolchain is for LEON sparc, it can assume FPU.
-    if (Triple.getArch() == llvm::Triple::sparcel)
-      llvm::sys::path::append(CompilerSupportDir, "le");
     addPathIfExists(D, CompilerSupportDir, getFilePaths());
   }
 }

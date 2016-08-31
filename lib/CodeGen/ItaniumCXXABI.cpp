@@ -1390,6 +1390,10 @@ void ItaniumCXXABI::addImplicitStructorParams(CodeGenFunction &CGF,
 }
 
 void ItaniumCXXABI::EmitInstanceFunctionProlog(CodeGenFunction &CGF) {
+  // Naked functions have no prolog.
+  if (CGF.CurFuncDecl && CGF.CurFuncDecl->hasAttr<NakedAttr>())
+    return;
+
   /// Initialize the 'this' slot.
   EmitThisParam(CGF);
 
@@ -2342,8 +2346,7 @@ LValue ItaniumCXXABI::EmitThreadLocalVarDeclLValue(CodeGenFunction &CGF,
   llvm::Function *Wrapper = getOrCreateThreadLocalWrapper(VD, Val);
 
   llvm::CallInst *CallVal = CGF.Builder.CreateCall(Wrapper);
-  if (isThreadWrapperReplaceable(VD, CGF.CGM))
-    CallVal->setCallingConv(llvm::CallingConv::CXX_FAST_TLS);
+  CallVal->setCallingConv(Wrapper->getCallingConv());
 
   LValue LV;
   if (VD->getType()->isReferenceType())

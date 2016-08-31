@@ -6,13 +6,14 @@
 //
 // No module file: init.h performs init.
 // RUN: %clang_cc1 -fmodules -fno-implicit-modules -x c++ -I %S/Inputs/unused-global-init -triple %itanium_abi_triple -emit-llvm -o - %s -DINIT | FileCheck --check-prefix=CHECK-INIT %s
-// RUN: %clang_cc1 -fmodules -fno-implicit-modules -x c++ -I %S/Inputs/unused-global-init -triple %itanium_abi_triple -emit-llvm -o - %s -DOTHER -DUSED -DUNUSED | FileCheck --check-prefix=CHECK-NO-INIT %s
+// RUN: %clang_cc1 -fmodules -fno-implicit-modules -x c++ -I %S/Inputs/unused-global-init -triple %itanium_abi_triple -emit-llvm -o - %s -DUSED | FileCheck --check-prefix=CHECK-INIT %s
+// RUN: %clang_cc1 -fmodules -fno-implicit-modules -x c++ -I %S/Inputs/unused-global-init -triple %itanium_abi_triple -emit-llvm -o - %s -DOTHER -DUNUSED | FileCheck --check-prefix=CHECK-NO-INIT %s
 //
 // With module files: if there is a transitive import of any part of the
 // module, we run its global initializers (even if the imported piece is not
 // visible here).
 // RUN: %clang_cc1 -fmodules -fno-implicit-modules -x c++ -I %S/Inputs/unused-global-init -triple %itanium_abi_triple -emit-llvm -o - %s -fmodule-file=%t/used.pcm -fmodule-file=%t/unused.pcm -DINIT | FileCheck --check-prefix=CHECK-INIT %s
-// RUN: %clang_cc1 -fmodules -fno-implicit-modules -x c++ -I %S/Inputs/unused-global-init -triple %itanium_abi_triple -emit-llvm -o - %s -fmodule-file=%t/used.pcm -fmodule-file=%t/unused.pcm -DOTHER | FileCheck --check-prefix=CHECK-INIT %s
+// RUN: %clang_cc1 -fmodules -fno-implicit-modules -x c++ -I %S/Inputs/unused-global-init -triple %itanium_abi_triple -emit-llvm -o - %s -fmodule-file=%t/used.pcm -fmodule-file=%t/unused.pcm -DOTHER | FileCheck --check-prefix=CHECK-NO-INIT %s
 // RUN: %clang_cc1 -fmodules -fno-implicit-modules -x c++ -I %S/Inputs/unused-global-init -triple %itanium_abi_triple -emit-llvm -o - %s -fmodule-file=%t/used.pcm -fmodule-file=%t/unused.pcm -DUSED | FileCheck --check-prefix=CHECK-INIT %s
 // RUN: %clang_cc1 -fmodules -fno-implicit-modules -x c++ -I %S/Inputs/unused-global-init -triple %itanium_abi_triple -emit-llvm -o - %s -fmodule-file=%t/used.pcm -fmodule-file=%t/unused.pcm -DUNUSED | FileCheck --check-prefix=CHECK-NO-INIT %s
 

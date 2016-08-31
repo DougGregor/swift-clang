@@ -1,2 +1,2 @@
 // used.h
-#include "other.h"
+#include "init.h"

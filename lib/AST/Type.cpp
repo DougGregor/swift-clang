@@ -11,6 +11,7 @@
 //
 //===----------------------------------------------------------------------===//
 
+#include "clang/AST/Type.h"
 #include "clang/AST/ASTContext.h"
 #include "clang/AST/Attr.h"
 #include "clang/AST/CharUnits.h"
@@ -19,13 +20,11 @@
 #include "clang/AST/DeclTemplate.h"
 #include "clang/AST/Expr.h"
 #include "clang/AST/PrettyPrinter.h"
-#include "clang/AST/Type.h"
 #include "clang/AST/TypeVisitor.h"
 #include "clang/Basic/Specifiers.h"
 #include "clang/Basic/TargetInfo.h"
 #include "llvm/ADT/APSInt.h"
 #include "llvm/ADT/StringExtras.h"
-#include "llvm/Support/raw_ostream.h"
 #include <algorithm>
 using namespace clang;
 
@@ -3687,10 +3686,18 @@ bool Type::isObjCARCImplicitlyUnretainedType() const {
 }
 
 bool Type::isObjCNSObjectType() const {
-  if (const TypedefType *typedefType = dyn_cast<TypedefType>(this))
-    return typedefType->getDecl()->hasAttr<ObjCNSObjectAttr>();
-  return false;
+  const Type *cur = this;
+  while (true) {
+    if (const TypedefType *typedefType = dyn_cast<TypedefType>(cur))
+      return typedefType->getDecl()->hasAttr<ObjCNSObjectAttr>();
+
+    // Single-step desugar until we run out of sugar.
+    QualType next = cur->getLocallyUnqualifiedSingleStepDesugaredType();
+    if (next.getTypePtr() == cur) return false;
+    cur = next.getTypePtr();
+  }
 }
+
 bool Type::isObjCIndependentClassType() const {
   if (const TypedefType *typedefType = dyn_cast<TypedefType>(this))
     return typedefType->getDecl()->hasAttr<ObjCIndependentClassAttr>();

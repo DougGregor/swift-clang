@@ -50,7 +50,6 @@ void f() {
   int info[4];
   __cpuid(info, 0);
   __cpuidex(info, 0, 0);
-  _xgetbv(0);
   __halt();
   __readmsr(0);
 
@@ -59,5 +58,9 @@ void f() {
 #ifndef _M_X64
   __readcr3();
   __writecr3(0);
+#endif
+
+#ifdef _M_ARM
+  __dmb(_ARM_BARRIER_ISHST);
 #endif
 }
